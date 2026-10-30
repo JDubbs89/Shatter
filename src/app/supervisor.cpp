@@ -31,7 +31,10 @@ constexpr std::string_view kUsage =
     "       shatter --set-gain app <channel-id> <decibels>\n"
     "       shatter --set-gain stream <pipewire-node-id> <decibels>\n"
     "       shatter --set-mute app <channel-id> <on|off>\n"
-    "       shatter --set-mute stream <pipewire-node-id> <on|off>\n";
+    "       shatter --set-mute stream <pipewire-node-id> <on|off>\n"
+    "       shatter --set-capture-source <pipewire-source-node-id>\n"
+    "       shatter --set-capture-gain <decibels>\n"
+    "       shatter --set-capture-send <on|off>\n";
 constexpr std::string_view kEngineArgument = "--engine";
 constexpr std::string_view kStartupBanner = R"( ______     __  __     ______     ______   ______   ______     ______
 ╱╲  ___╲   ╱╲ ╲_╲ ╲   ╱╲  __ ╲   ╱╲__  _╲ ╱╲__  _╲ ╱╲  ___╲   ╱╲  == ╲
@@ -267,6 +270,41 @@ int serve()
                 std::string profile_error;
                 const std::string report = audio_engine.profile_stop(profile_error);
                 reply = report.empty() ? "ERR " + profile_error + "\n" : report;
+            } else if (input.starts_with("CAPTURE-SOURCE ")) {
+                std::string value(input.substr(std::string_view("CAPTURE-SOURCE ").size()));
+                std::uint32_t source_id = PW_ID_ANY;
+                const auto [end, parse_error] = std::from_chars(value.data(), value.data() + value.size(), source_id);
+                std::string capture_error;
+                if (parse_error != std::errc{} || end != value.data() + value.size()) {
+                    reply = "ERR capture source id must be a PipeWire node id\n";
+                } else if (audio_engine.set_capture_source(source_id, capture_error)) {
+                    reply = "OK capture source set to " + value + "; speaker send off\n";
+                } else {
+                    reply = "ERR " + capture_error + "\n";
+                }
+            } else if (input.starts_with("CAPTURE-GAIN ")) {
+                std::istringstream parsed{std::string(input)};
+                std::string action;
+                float decibels = 0.0F;
+                std::string extra;
+                std::string capture_error;
+                if (!(parsed >> action >> decibels) || (parsed >> extra)) {
+                    reply = "ERR expected CAPTURE-GAIN <decibels>\n";
+                } else if (audio_engine.set_capture_gain_db(decibels, capture_error)) {
+                    reply = "OK capture channel gain set to " + std::to_string(decibels) + " dB\n";
+                } else {
+                    reply = "ERR " + capture_error + "\n";
+                }
+            } else if (input.starts_with("CAPTURE-SEND ")) {
+                const std::string_view value = input.substr(std::string_view("CAPTURE-SEND ").size());
+                std::string capture_error;
+                if (value != "on" && value != "off") {
+                    reply = "ERR expected CAPTURE-SEND <on|off>\n";
+                } else if (audio_engine.set_capture_speaker_send(value == "on", capture_error)) {
+                    reply = std::string("OK capture speaker send ") + std::string(value) + "\n";
+                } else {
+                    reply = "ERR " + capture_error + "\n";
+                }
             } else if (input.starts_with("GAIN ")) {
                 std::istringstream parsed{std::string(input)};
                 std::string action;
@@ -448,6 +486,52 @@ int run_cli(int argc, char** argv)
                 std::cerr << response;
                 return 1;
             }
+            std::cout << response;
+            return 0;
+        }
+
+        if (argc == 3 && std::string_view(argv[1]) == "--set-capture-source") {
+            std::uint32_t source_id = 0;
+            const std::string_view value(argv[2]);
+            const auto [end, parse_error] = std::from_chars(value.data(), value.data() + value.size(), source_id);
+            if (parse_error != std::errc{} || end != value.data() + value.size()) {
+                std::cerr << "Capture source id must be a PipeWire node id.\n";
+                return 2;
+            }
+            const std::string response = request("CAPTURE-SOURCE " + std::string(value));
+            if (response.empty()) {
+                std::cerr << "Shatter engine is unavailable; run `shatter start` first.\n";
+                return 1;
+            }
+            if (response.starts_with("ERR ")) { std::cerr << response; return 1; }
+            std::cout << response;
+            return 0;
+        }
+
+        if (argc == 3 && std::string_view(argv[1]) == "--set-capture-gain") {
+            float decibels = 0.0F;
+            const std::string_view value(argv[2]);
+            const auto [end, parse_error] = std::from_chars(value.data(), value.data() + value.size(), decibels);
+            if (parse_error != std::errc{} || end != value.data() + value.size()) {
+                std::cerr << "Capture gain must be a number in dB.\n";
+                return 2;
+            }
+            const std::string response = request("CAPTURE-GAIN " + std::to_string(decibels));
+            if (response.empty()) { std::cerr << "Shatter engine is unavailable; run `shatter start` first.\n"; return 1; }
+            if (response.starts_with("ERR ")) { std::cerr << response; return 1; }
+            std::cout << response;
+            return 0;
+        }
+
+        if (argc == 3 && std::string_view(argv[1]) == "--set-capture-send") {
+            const std::string_view value(argv[2]);
+            if (value != "on" && value != "off") {
+                std::cerr << "Usage: shatter --set-capture-send <on|off>\n";
+                return 2;
+            }
+            const std::string response = request("CAPTURE-SEND " + std::string(value));
+            if (response.empty()) { std::cerr << "Shatter engine is unavailable; run `shatter start` first.\n"; return 1; }
+            if (response.starts_with("ERR ")) { std::cerr << response; return 1; }
             std::cout << response;
             return 0;
         }

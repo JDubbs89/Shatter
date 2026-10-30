@@ -63,9 +63,17 @@ find_program(PYTHON3_TEST_EXECUTABLE python3)
 if(PIPEWIRE_TEST_EXECUTABLE AND WIREPLUMBER_TEST_EXECUTABLE AND PW_CLI_TEST_EXECUTABLE
    AND WPCTL_TEST_EXECUTABLE AND PW_PLAY_TEST_EXECUTABLE AND PW_RECORD_TEST_EXECUTABLE
    AND PW_LINK_TEST_EXECUTABLE AND PYTHON3_TEST_EXECUTABLE)
+    add_executable(pipewire_test_source tests/integration/pipewire-test-source.cpp)
+    target_link_libraries(pipewire_test_source PRIVATE PkgConfig::PIPEWIRE)
+    target_compile_features(pipewire_test_source PRIVATE cxx_std_20)
     add_test(
         NAME app_playback_routing
         COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/app-playback-routing.sh" "$<TARGET_FILE:shatter>"
     )
-    set_tests_properties(app_playback_routing PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+    add_test(
+        NAME microphone_capture_routing
+        COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/capture-routing.sh"
+            "$<TARGET_FILE:shatter>" "$<TARGET_FILE:pipewire_test_source>"
+    )
+    set_tests_properties(app_playback_routing microphone_capture_routing PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
 endif()

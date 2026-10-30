@@ -129,10 +129,10 @@ fi
 sleep 0.25
 profile=$($binary --profile-stop)
 case "$profile" in
-    *"Shatter runtime profile"*"Speaker output callbacks:"*"Shatter input ring occupancy avg/max:"*"PipeWire reported max device delay:"*) ;;
+    *"Shatter runtime profile"*"Speaker output"*"Frames unavailable at mix time"*"Shatter input ring occupancy avg/max"*"PipeWire max device delay"*) ;;
     *) echo "profile summary is missing runtime metrics: $profile" >&2; exit 1 ;;
 esac
-output_callbacks=$(printf '%s\n' "$profile" | awk -F': ' '/Speaker output callbacks:/ { print $2; exit }')
+output_callbacks=$(printf '%s\n' "$profile" | awk -F'|' '/Speaker output/ { gsub(/[[:space:]]/, "", $3); print $3; exit }')
 if [ -z "$output_callbacks" ] || [ "$output_callbacks" -le 0 ]; then
     echo "profile did not record speaker output callbacks: $profile" >&2
     exit 1
