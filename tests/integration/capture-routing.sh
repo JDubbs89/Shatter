@@ -87,7 +87,7 @@ engine_running=1
 "$binary" assign out "Capture Monitor" "sink-$sink_id"
 inputs=$($binary --list-in)
 case "$inputs" in
-    *"Capture source"*"shatter-test-mic-source ($source_id)"*) ;;
+    *"Available capture sources"*"source-$source_id"*"shatter-test-mic-source"*) ;;
     *) echo "selected source is missing from input list: $inputs" >&2; exit 1 ;;
 esac
 
@@ -95,7 +95,7 @@ esac
 sleep 0.3
 inputs=$($binary --list-in)
 case "$inputs" in
-    *"speaker send off"*|*"sends off"*) ;;
+    *"| off "*) ;;
     *) echo "capture speaker send should default off: $inputs" >&2; exit 1 ;;
 esac
 if ! "$binary" --set-capture-send off >/dev/null; then

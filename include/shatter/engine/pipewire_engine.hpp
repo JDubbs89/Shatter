@@ -89,8 +89,9 @@ private:
         pw_stream_events events{};
         std::atomic<float> target_gain{1.0F};
         std::atomic<bool> muted{false};
-        std::atomic<std::uint32_t> output_mask{1};
+        std::atomic<std::uint32_t> output_mask{0};
         float smoothed_gain = 1.0F;
+        std::array<float, max_output_channels> smoothed_send_gain{};
         std::array<AudioRingBuffer, max_output_channels> audio;
         std::array<AudioRingBuffer, max_output_channels> send_audio;
     };

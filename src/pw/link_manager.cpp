@@ -273,6 +273,7 @@ bool PipeWireEngine::delete_output_locked(std::string_view selector, std::string
     destroy_output_stream(*output);
     trace_output("delete.after-destroy", output, output->node_name);
     for (auto& stream : playback_streams_) {
+        stream.output_mask.fetch_and(~bit, std::memory_order_release);
         stream.audio[index].discard_all();
         stream.send_audio[index].discard_all();
     }

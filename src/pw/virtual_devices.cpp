@@ -73,7 +73,9 @@ void PipeWireEngine::handle_playback_node(std::uint32_t node_id, NodeInfo node)
         stream->mixer_users.store(0, std::memory_order_relaxed);
         stream->target_gain.store(1.0F, std::memory_order_relaxed);
         stream->muted.store(false, std::memory_order_relaxed);
+        stream->output_mask.store(0, std::memory_order_relaxed);
         stream->smoothed_gain = 1.0F;
+        stream->smoothed_send_gain.fill(1.0F);
         stream->node_id = node_id;
         stream->channel_index = node.channel_index;
         stream->name = node.name.empty() ? node.description : node.name;

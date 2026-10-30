@@ -104,7 +104,7 @@ wait_for_apps()
     expected=$1
     for attempt in $(seq 1 80); do
         inputs=$("$binary" --list-in)
-        count=$(printf '%s\n' "$inputs" | grep -Ec '\([0-9]+\)$' || true)
+        count=$(printf '%s\n' "$inputs" | grep -Ec '/ stream' || true)
         if [ "$count" -ge "$expected" ]; then
             printf '%s\n' "$inputs"
             return 0
@@ -117,7 +117,13 @@ wait_for_apps()
 }
 
 inputs=$(wait_for_apps 1)
-app_a_id=$(printf '%s\n' "$inputs" | awk '$1 ~ /^app-/ && $2 == "TestAppA" { print $1; exit }')
+stream_default_sends=$(printf '%s\n' "$inputs" | awk -F'|' '/\/ stream/ { gsub(/^[[:space:]]+|[[:space:]]+$/, "", $7); print $7; exit }')
+app_default_sends=$(printf '%s\n' "$inputs" | awk -F'|' '/\/ app[[:space:]]*\|/ { gsub(/^[[:space:]]+|[[:space:]]+$/, "", $7); print $7; exit }')
+if [ "$stream_default_sends" != "off" ] || [ "$app_default_sends" != "speakers" ]; then
+    echo "playback streams should inherit the app's default speaker route without a direct send: $inputs" >&2
+    exit 1
+fi
+app_a_id=$(printf '%s\n' "$inputs" | awk -F'|' '$3 ~ /TestAppA/ && $2 ~ /app-/ { split($2, channel, " / "); gsub(/^[[:space:]]+|[[:space:]]+$/, "", channel[1]); print channel[1]; exit }')
 if [ -z "$app_a_id" ]; then
     echo "$inputs" >&2
     echo "app channel ID was not listed" >&2
@@ -198,9 +204,8 @@ sleep 0.25
 record_monitor "$test_root/app-quiet.raw"
 "$binary" --set-gain app "$app_a_id" 0
 
-stream_a_id=$(printf '%s\n' "$inputs" | awk -v channel="$app_a_id" '
-    $1 ~ /^app-/ { selected = ($1 == channel) }
-    selected && /\([0-9]+\)$/ { row=$0; sub(/^.*\(/, "", row); sub(/\).*$/, "", row); print row; exit }
+stream_a_id=$(printf '%s\n' "$inputs" | awk -F'|' -v channel="$app_a_id" '
+    index($0, channel " / stream") { row=$6; sub(/^.*\(/, "", row); sub(/\).*/, "", row); print row; exit }
 ')
 if [ -z "$stream_a_id" ]; then
     echo "$inputs" >&2
@@ -239,6 +244,7 @@ esac
 record_monitor "$test_root/named-output.raw" 96000 shatter-test-headphones
 assert_audio_rms_at_least "$test_root/named-output.raw" 0.005 \
     "assigned app channel produced no audio at the named output sink"
+"$binary" assign stream "$stream_a_id" speakers
 "$binary" assign stream "$stream_a_id" "Headphone Monitor"
 sleep 0.3
 record_monitor "$test_root/app-and-stream-output.raw" 96000 shatter-test-headphones
@@ -250,10 +256,17 @@ awk -v combined="$app_and_stream_rms" -v app_only="$app_only_rms" \
     exit 1
 }
 "$binary" unassign app "$app_a_id" "Headphone Monitor"
+"$binary" --set-gain app "$app_a_id" -20
 sleep 0.3
 record_monitor "$test_root/stream-only-output.raw" 96000 shatter-test-headphones
 assert_audio_rms_at_least "$test_root/stream-only-output.raw" 0.005 \
     "stream send stopped when its independent app send was removed"
+stream_only_rms=$(audio_rms "$test_root/stream-only-output.raw")
+awk -v stream="$stream_only_rms" -v app="$app_only_rms" 'BEGIN { exit !(stream < app * 0.2) }' || {
+    echo "direct stream send did not inherit parent app gain: app=$app_only_rms stream=$stream_only_rms" >&2
+    exit 1
+}
+"$binary" --set-gain app "$app_a_id" 0
 "$binary" assign app "$app_a_id" "Headphone Monitor"
 "$binary" assign out "Headphone Monitor" "sink-$sink_id"
 sleep 0.3
@@ -302,7 +315,9 @@ case "$output_row" in
     *) ;;
 esac
 "$binary" unassign app "$app_a_id" "Headphone Monitor"
+"$binary" unassign stream "$stream_a_id" "Headphone Monitor"
 "$binary" delete out "Headphone Monitor"
+"$binary" unassign stream "$stream_a_id" speakers
 output_listing=$("$binary" --list-out)
 case "$output_listing" in
     *"Headphone Monitor"*) echo "deleted output channel remained in the output list: $output_listing" >&2; exit 1 ;;
@@ -330,15 +345,14 @@ playback_pids="$playback_pids $!"
 pw-play --target default -P 'application.name=TestAppB application.id=org.shatter.test.appb' "$test_root/sine.wav" >/dev/null 2>&1 &
 playback_pids="$playback_pids $!"
 inputs=$(wait_for_apps 3)
-app_b_id=$(printf '%s\n' "$inputs" | awk '$1 ~ /^app-/ && $2 == "TestAppB" { print $1; exit }')
+app_b_id=$(printf '%s\n' "$inputs" | awk -F'|' '$3 ~ /TestAppB/ && $2 ~ /app-/ { split($2, channel, " / "); gsub(/^[[:space:]]+|[[:space:]]+$/, "", channel[1]); print channel[1]; exit }')
 if [ -z "$app_b_id" ] || [ "$app_a_id" = "$app_b_id" ]; then
     echo "$inputs" >&2
     echo "separate applications did not receive separate channels" >&2
     exit 1
 fi
-stream_a_ids=$(printf '%s\n' "$inputs" | awk -v channel="$app_a_id" '
-    $1 ~ /^app-/ { selected = ($1 == channel) }
-    selected && /\([0-9]+\)$/ { row=$0; sub(/^.*\(/, "", row); sub(/\).*$/, "", row); print row }
+stream_a_ids=$(printf '%s\n' "$inputs" | awk -F'|' -v channel="$app_a_id" '
+    index($0, channel " / stream") { row=$6; sub(/^.*\(/, "", row); sub(/\).*/, "", row); print row }
 ')
 set -- $stream_a_ids
 if [ "$#" -ne 2 ]; then

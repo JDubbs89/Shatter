@@ -77,8 +77,7 @@ void PipeWireEngine::stream_input_process(PlaybackStream& stream)
                             samples, frames, stream.smoothed_gain, increment));
                     }
                     if ((stream_mask & (1U << output_index)) != 0) {
-                        written = std::min(written, stream.send_audio[output_index].write_with_gain_ramp(
-                            samples, frames, stream.smoothed_gain, increment));
+                        written = std::min(written, stream.send_audio[output_index].write(samples, frames));
                     }
                 }
                 output.input_users.fetch_sub(1, std::memory_order_release);
@@ -208,40 +207,54 @@ void PipeWireEngine::output_process(OutputChannel& output)
                         profile_scope.record_unfilled_mix_frames(block_frames - consumed);
                         stream.mixer_users.fetch_sub(1, std::memory_order_release);
                     }
-                    if (!assigned) continue;
                     const float target = channel.muted.load(std::memory_order_relaxed)
                         ? 0.0F : channel.target_gain.load(std::memory_order_relaxed);
                     float gain = channel.smoothed_gain[output_index];
                     const float increment = block_frames == 0 ? 0.0F
                         : (target - gain) / static_cast<float>(block_frames);
-                    for (std::size_t frame = 0; frame < block_frames; ++frame) {
-                        samples[output_offset + frame * kChannels] += channel_mix[frame * kChannels] * gain;
-                        samples[output_offset + frame * kChannels + 1] += channel_mix[frame * kChannels + 1] * gain;
-                        gain += increment;
-                    }
-                    channel.smoothed_gain[output_index] = target;
-                }
-
-                for (std::size_t stream_index = 0; stream_index < stream_count; ++stream_index) {
-                    PlaybackStream& stream = playback_streams_[stream_index];
-                    if (!stream.active.load(std::memory_order_acquire) ||
-                        (stream.output_mask.load(std::memory_order_acquire) & output_bit) == 0) continue;
-                    std::uint32_t stream_users = stream.mixer_users.load(std::memory_order_acquire);
-                    bool stream_acquired = false;
-                    while ((stream_users & kMixerClosed) == 0) {
-                        if (stream.mixer_users.compare_exchange_weak(stream_users, stream_users + 1,
-                                std::memory_order_acquire, std::memory_order_relaxed)) {
-                            stream_acquired = true;
-                            break;
+                    if (assigned) {
+                        float app_gain = gain;
+                        for (std::size_t frame = 0; frame < block_frames; ++frame) {
+                            samples[output_offset + frame * kChannels] += channel_mix[frame * kChannels] * app_gain;
+                            samples[output_offset + frame * kChannels + 1] += channel_mix[frame * kChannels + 1] * app_gain;
+                            app_gain += increment;
                         }
                     }
-                    if (!stream_acquired) continue;
-                    auto& ring = stream.send_audio[output_index];
-                    const auto consumed = ring.read(channel_mix.data(), block_frames);
-                    for (std::size_t sample = 0; sample < block_frames * kChannels; ++sample)
-                        samples[output_offset + sample] += channel_mix[sample];
-                    profile_scope.record_unfilled_mix_frames(block_frames - consumed);
-                    stream.mixer_users.fetch_sub(1, std::memory_order_release);
+                    channel.smoothed_gain[output_index] = target;
+
+                    for (std::size_t stream_index = 0; stream_index < stream_count; ++stream_index) {
+                        PlaybackStream& stream = playback_streams_[stream_index];
+                        if (!stream.active.load(std::memory_order_acquire) || stream.channel_index != channel_index ||
+                            (stream.output_mask.load(std::memory_order_acquire) & output_bit) == 0) continue;
+                        std::uint32_t stream_users = stream.mixer_users.load(std::memory_order_acquire);
+                        bool stream_acquired = false;
+                        while ((stream_users & kMixerClosed) == 0) {
+                            if (stream.mixer_users.compare_exchange_weak(stream_users, stream_users + 1,
+                                    std::memory_order_acquire, std::memory_order_relaxed)) {
+                                stream_acquired = true;
+                                break;
+                            }
+                        }
+                        if (!stream_acquired) continue;
+                        auto& ring = stream.send_audio[output_index];
+                        const auto consumed = ring.read(channel_mix.data(), block_frames);
+                        profile_scope.record_unfilled_mix_frames(block_frames - consumed);
+                        const float stream_target = stream.muted.load(std::memory_order_relaxed)
+                            ? 0.0F : stream.target_gain.load(std::memory_order_relaxed);
+                        float stream_gain = stream.smoothed_send_gain[output_index];
+                        const float stream_increment = block_frames == 0 ? 0.0F
+                            : (stream_target - stream_gain) / static_cast<float>(block_frames);
+                        float app_gain = gain;
+                        for (std::size_t frame = 0; frame < block_frames; ++frame) {
+                            const float combined_gain = app_gain * stream_gain;
+                            samples[output_offset + frame * kChannels] += channel_mix[frame * kChannels] * combined_gain;
+                            samples[output_offset + frame * kChannels + 1] += channel_mix[frame * kChannels + 1] * combined_gain;
+                            app_gain += increment;
+                            stream_gain += stream_increment;
+                        }
+                        stream.smoothed_send_gain[output_index] = stream_target;
+                        stream.mixer_users.fetch_sub(1, std::memory_order_release);
+                    }
                 }
 
                 std::fill(channel_mix.begin(), channel_mix.begin() + block_frames * kChannels, 0.0F);

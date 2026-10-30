@@ -54,9 +54,55 @@ std::string fit_column(std::string_view value, std::size_t width)
     return std::string(value.substr(0, width - 3)) + "...";
 }
 
+using TableRow = std::vector<std::string>;
+
+void append_table_border(std::ostringstream& table, const std::vector<std::size_t>& widths)
+{
+    table << '+';
+    for (const std::size_t width : widths) table << std::string(width + 2, '-') << '+';
+    table << '\n';
+}
+
+void append_table_row(std::ostringstream& table, const TableRow& row,
+                      const std::vector<std::size_t>& widths)
+{
+    table << '|';
+    for (std::size_t column = 0; column < widths.size(); ++column) {
+        const std::string_view value = column < row.size() ? std::string_view(row[column]) : std::string_view{};
+        table << ' ' << std::left << std::setw(static_cast<int>(widths[column]))
+              << fit_column(value, widths[column]) << " |";
+    }
+    table << '\n';
+}
+
+void append_table(std::ostringstream& table, const std::vector<std::string>& headers,
+                  const std::vector<TableRow>& rows, const std::vector<std::size_t>& maximum_widths)
+{
+    std::vector<std::size_t> widths(headers.size(), 1);
+    for (std::size_t column = 0; column < headers.size(); ++column) {
+        widths[column] = std::min(headers[column].size(), maximum_widths[column]);
+        for (const auto& row : rows) {
+            if (column < row.size()) widths[column] = std::max(widths[column],
+                std::min(row[column].size(), maximum_widths[column]));
+        }
+    }
+    append_table_border(table, widths);
+    append_table_row(table, headers, widths);
+    append_table_border(table, widths);
+    for (const auto& row : rows) append_table_row(table, row, widths);
+    append_table_border(table, widths);
+}
+
 float gain_db(float linear)
 {
     return linear <= 0.0F ? -60.0F : std::max(-60.0F, 20.0F * std::log10(linear));
+}
+
+std::string format_gain(float linear)
+{
+    std::ostringstream value;
+    value << std::fixed << std::setprecision(1) << gain_db(linear) << " dB";
+    return value.str();
 }
 
 std::string make_channel_id(std::string_view identity)
@@ -336,84 +382,66 @@ bool PipeWireEngine::load_config(std::string_view name, std::string& error)
     return true;
 }
 
-std::string PipeWireEngine::list_inputs(std::size_t terminal_width) const
+std::string PipeWireEngine::list_inputs(std::size_t) const
 {
-    terminal_width = std::max<std::size_t>(72, std::min<std::size_t>(terminal_width, 240));
-    const std::size_t stream_column = terminal_width - 59;
     std::lock_guard lock(nodes_mutex_);
     std::ostringstream table;
-    table << "Shatter inputs\n"
-          << std::left << std::setw(23) << "Channel ID" << std::setw(20) << "Application"
-          << std::setw(9) << "Gain" << std::setw(7) << "Mute" << "Playback stream (PipeWire node ID)\n"
-          << std::string(terminal_width, '-') << '\n';
+    table << "Shatter inputs\n";
+    std::vector<TableRow> input_rows;
 
     const auto channel_count = allocated_channels_.load(std::memory_order_relaxed);
     const auto stream_count = allocated_streams_.load(std::memory_order_relaxed);
-    const auto append_sends = [&table, this](std::uint32_t mask) {
-        table << " sends: ";
+    const auto send_names = [this](std::uint32_t mask) {
+        std::string sends;
         bool first = true;
         for (std::size_t i = 0; i < output_channels_.size(); ++i) {
             if ((mask & (1U << i)) == 0 || !output_channels_[i].in_use) continue;
-            table << (first ? "" : ", ") << output_channels_[i].name;
+            sends += (first ? "" : ", ") + output_channels_[i].name;
             first = false;
         }
-        if (first) table << "off";
+        return first ? std::string("off") : sends;
     };
     for (std::size_t channel_index = 0; channel_index < channel_count; ++channel_index) {
         const AppChannel& channel = app_channels_[channel_index];
-        table << std::setw(23) << channel.id << std::setw(20) << fit_column(channel.name, 19)
-              << std::setw(9) << (std::to_string(gain_db(channel.target_gain.load())) + " dB")
-              << std::setw(7) << (channel.muted.load() ? "yes" : "no");
         bool has_stream = false;
         for (std::size_t stream_index = 0; stream_index < stream_count; ++stream_index) {
             const PlaybackStream& stream = playback_streams_[stream_index];
             if (!stream.active.load(std::memory_order_relaxed) || stream.channel_index != channel_index) {
                 continue;
             }
-            if (has_stream) {
-                table << std::setw(23) << "" << std::setw(20) << "" << std::setw(9) << "" << std::setw(7) << "";
-            }
-            const std::string suffix = " (" + std::to_string(stream.node_id) + ")";
-            table << fit_column(stream.name, stream_column > suffix.size() ? stream_column - suffix.size() : 1) << suffix;
-            table << '\n';
-            table << "  playback stream";
-            append_sends(stream.output_mask.load(std::memory_order_relaxed));
-            table << '\n';
+            input_rows.push_back({channel.id + " / stream", channel.name,
+                format_gain(stream.target_gain.load()),
+                stream.muted.load() ? "yes" : "no",
+                stream.name + " (" + std::to_string(stream.node_id) + ")",
+                send_names(stream.output_mask.load(std::memory_order_relaxed))});
             has_stream = true;
         }
-        if (!has_stream) {
-            table << "no active playback streams\n";
-        }
-        table << "  app channel";
-        append_sends(channel.output_mask.load(std::memory_order_relaxed));
-        table << '\n';
+        input_rows.push_back({channel.id + " / app", channel.name,
+            format_gain(channel.target_gain.load()),
+            channel.muted.load() ? "yes" : "no",
+            has_stream ? "App channel mix" : "No active playback streams",
+            send_names(channel.output_mask.load(std::memory_order_relaxed))});
     }
     if (channel_count == 0) {
-        table << "No application playback streams have been discovered\n";
+        input_rows.push_back({"-", "-", "-", "-", "No app streams discovered", "-"});
     }
 
-    table << std::setw(23) << "capture" << std::setw(20) << "Microphone"
-          << std::setw(9) << (std::to_string(gain_db(capture_channel_.target_gain.load())) + " dB")
-          << std::setw(7) << (capture_channel_.muted.load() ? "yes" : "no");
+    std::string capture_input;
     if (capture_channel_.source_node_id == PW_ID_ANY) {
-        table << "No capture source selected; speaker send off\n";
+        capture_input = "No source selected";
     } else {
         const auto source = nodes_.find(capture_channel_.source_node_id);
         const std::string source_name = source == nodes_.end()
             ? "Capture source unavailable"
             : source->second.name.empty() ? source->second.description : source->second.name;
-        table << source_name << " (" << capture_channel_.source_node_id << ") ("
-              << (capture_channel_.active.load(std::memory_order_relaxed) ? "connected" : "connecting")
-              << "; sends ";
-        const auto mask = capture_channel_.output_mask.load(std::memory_order_relaxed);
-        bool first = true;
-        for (std::size_t i = 0; i < output_channels_.size(); ++i) {
-            if ((mask & (1U << i)) == 0 || !output_channels_[i].in_use) continue;
-            table << (first ? "" : ", ") << output_channels_[i].name;
-            first = false;
-        }
-        table << (first ? "off" : "") << ")\n";
+        capture_input = source_name + " (" + std::to_string(capture_channel_.source_node_id) + ", " +
+            (capture_channel_.active.load(std::memory_order_relaxed) ? "connected" : "connecting") + ")";
     }
+    input_rows.push_back({"capture", "Microphone", format_gain(capture_channel_.target_gain.load()),
+        capture_channel_.muted.load() ? "yes" : "no", capture_input,
+        send_names(capture_channel_.output_mask.load(std::memory_order_relaxed))});
+    append_table(table, {"Channel / type", "Application", "Gain", "Mute", "Input / PipeWire node", "Output sends"},
+        input_rows, {30, 18, 8, 5, 30, 20});
 
     std::vector<NodeInfo> capture_sources;
     for (const auto& [id, node] : nodes_) {
@@ -425,17 +453,17 @@ std::string PipeWireEngine::list_inputs(std::size_t terminal_width) const
     std::sort(capture_sources.begin(), capture_sources.end(), [](const NodeInfo& left, const NodeInfo& right) {
         return left.name < right.name;
     });
+    std::vector<TableRow> source_rows;
     for (const auto& node : capture_sources) {
-        table << std::setw(23) << "available" << std::setw(20) << "Capture source"
-              << std::setw(9) << "" << std::setw(7) << ""
-              << (node.name.empty() ? node.description : node.name) << " (" << node.node_id << ")"
-              << (capture_channel_.source_node_id == node.node_id ? " (selected)\n" : " (available)\n");
+        source_rows.push_back({"source-" + std::to_string(node.node_id),
+            node.name.empty() ? node.description : node.name,
+            capture_channel_.source_node_id == node.node_id ? "selected" : "available"});
     }
     if (capture_sources.empty()) {
-        table << std::setw(23) << "available" << std::setw(20) << "Capture source"
-              << std::setw(9) << "" << std::setw(7) << ""
-              << "No PipeWire capture sources found\n";
+        source_rows.push_back({"-", "No PipeWire capture sources found", "-"});
     }
+    table << "\nAvailable capture sources\n";
+    append_table(table, {"PipeWire node ID", "Name", "Status"}, source_rows, {20, 48, 12});
     const auto unrouted_count = unrouted_playback_streams_.load(std::memory_order_relaxed);
     if (unrouted_count > 0) {
         table << "Warning: " << unrouted_count
@@ -444,45 +472,47 @@ std::string PipeWireEngine::list_inputs(std::size_t terminal_width) const
     return table.str();
 }
 
-std::string PipeWireEngine::list_outputs(std::size_t terminal_width) const
+std::string PipeWireEngine::list_outputs(std::size_t) const
 {
     std::lock_guard lock(nodes_mutex_);
     std::ostringstream table;
-    const std::size_t width = std::max<std::size_t>(40, terminal_width);
-    const std::size_t output_width = std::clamp<std::size_t>(width / 5, 12, 24);
-    const std::size_t id_width = std::clamp<std::size_t>(width / 6, 10, 16);
-    const std::size_t node_width = std::clamp<std::size_t>(width / 4, 10, 25);
-    const std::size_t sink_width = width - output_width - id_width - node_width;
-    table << "Shatter outputs\n"
-          << std::left << std::setw(static_cast<int>(output_width)) << fit_column("Output channel", output_width - 1)
-          << std::setw(static_cast<int>(id_width)) << fit_column("PipeWire node ID", id_width - 1)
-          << std::setw(static_cast<int>(node_width)) << fit_column("PipeWire node name", node_width - 1)
-          << fit_column("Assigned playback sink", sink_width) << '\n'
-          << std::string(output_width + id_width + node_width + sink_width, '-') << '\n';
+    table << "Shatter outputs\n";
+    std::vector<TableRow> output_rows;
     for (const auto& output : output_channels_) {
         if (!output.in_use) continue;
-        table << std::setw(static_cast<int>(output_width)) << fit_column(output.name, output_width - 1);
-        if (output.node_id == PW_ID_ANY) table << std::setw(static_cast<int>(id_width)) << "pending";
-        else table << std::setw(static_cast<int>(id_width)) << output.node_id;
-        table << std::setw(static_cast<int>(node_width)) << fit_column(output.node_name, node_width - 1);
-        std::string assigned_sinks;
+        const std::string node_id = output.node_id == PW_ID_ANY ? "pending" : std::to_string(output.node_id);
+        const std::string output_name = output.name + (output.node_name == kSpeakerStreamName ? " [default]" : "");
+        bool has_route = false;
         for (std::size_t i = 0; i < output.assigned_sink_count; ++i) {
-            if (!assigned_sinks.empty()) assigned_sinks += ", ";
-            const auto node_id = output.assigned_sink_node_ids[i];
-            if (node_id == PW_ID_ANY) {
-                assigned_sinks += output.assigned_sink_names[i] + " (reconnecting)";
+            const auto sink_id = output.assigned_sink_node_ids[i];
+            std::string route;
+            if (sink_id == PW_ID_ANY) {
+                route = fit_column(output.assigned_sink_names[i], 20) + " (reconnecting)";
             } else {
-                const auto target = nodes_.find(node_id);
-                const std::string& name = target == nodes_.end() ? output.assigned_sink_names[i] :
+                const auto target = nodes_.find(sink_id);
+                const std::string& sink_name = target == nodes_.end() ? output.assigned_sink_names[i] :
                     (target->second.name.empty() ? target->second.description : target->second.name);
-                assigned_sinks += name + " (sink-" + std::to_string(node_id) + ")";
+                route = fit_column(sink_name, 20) + " (sink-" + std::to_string(sink_id) + ")";
+            }
+            output_rows.push_back({output_name, node_id, output.node_name, route});
+            has_route = true;
+        }
+        if (!has_route && output.node_name == kSpeakerStreamName) {
+            for (std::size_t i = 0; i < output.sink_count; ++i) {
+                const auto sink_id = output.sink_node_ids[i];
+                const auto target = nodes_.find(sink_id);
+                if (target == nodes_.end()) continue;
+                const std::string& sink_name = target->second.name.empty() ? target->second.description : target->second.name;
+                output_rows.push_back({output_name, node_id, output.node_name,
+                    fit_column(sink_name, 20) + " (sink-" + std::to_string(sink_id) + ")"});
+                has_route = true;
             }
         }
-        if (assigned_sinks.empty()) assigned_sinks = "not assigned";
-        if (output.node_name == kSpeakerStreamName) assigned_sinks += " [default]";
-        table << fit_column(assigned_sinks, sink_width);
-        table << '\n';
+        if (!has_route) output_rows.push_back({output_name, node_id, output.node_name, "not assigned"});
     }
+    if (output_rows.empty()) output_rows.push_back({"-", "-", "-", "No output channels"});
+    append_table(table, {"Output channel", "PipeWire node ID", "PipeWire node name", "Assigned playback sinks"},
+        output_rows, {24, 16, 28, 40});
 
     std::vector<NodeInfo> playback_sinks;
     for (const auto& [id, node] : nodes_) {
@@ -494,22 +524,16 @@ std::string PipeWireEngine::list_outputs(std::size_t terminal_width) const
     std::sort(playback_sinks.begin(), playback_sinks.end(), [](const NodeInfo& left, const NodeInfo& right) {
         return left.name < right.name;
     });
-    const std::size_t sink_id_width = std::clamp<std::size_t>(width / 5, 12, 18);
-    const std::size_t sink_node_width = std::clamp<std::size_t>(width / 6, 10, 16);
-    const std::size_t sink_name_width = width - sink_id_width - sink_node_width;
-    table << "\nAvailable playback sinks\n"
-          << std::left << std::setw(static_cast<int>(sink_id_width)) << fit_column("Shatter sink ID", sink_id_width - 1)
-          << std::setw(static_cast<int>(sink_node_width)) << fit_column("PipeWire node ID", sink_node_width - 1)
-          << fit_column("Name", sink_name_width) << '\n'
-          << std::string(sink_id_width + sink_node_width + sink_name_width, '-') << '\n';
+    std::vector<TableRow> sink_rows;
     for (const auto& node : playback_sinks) {
-        table << std::setw(static_cast<int>(sink_id_width)) << fit_column("sink-" + std::to_string(node.node_id), sink_id_width - 1)
-              << std::setw(static_cast<int>(sink_node_width)) << node.node_id
-              << fit_column(node.name.empty() ? node.description : node.name, sink_name_width) << '\n';
+        sink_rows.push_back({"sink-" + std::to_string(node.node_id), std::to_string(node.node_id),
+            node.name.empty() ? node.description : node.name});
     }
     if (playback_sinks.empty()) {
-        table << "No PipeWire playback sinks found\n";
+        sink_rows.push_back({"-", "-", "No PipeWire playback sinks found"});
     }
+    table << "\nAvailable playback sinks\n";
+    append_table(table, {"Shatter sink ID", "PipeWire node ID", "Name"}, sink_rows, {20, 18, 48});
     return table.str();
 }
 

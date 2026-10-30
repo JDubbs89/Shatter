@@ -8,8 +8,9 @@
 
 - [x] `shatter assign stream <input-selector> <output-selector>` and `unassign` manage a playback stream's send.
 - [x] `shatter assign capture <input-selector> <output-selector>` and `unassign` manage the capture channel's send.
-- [x] Playback stream sends tap stream audio before app-channel gain; app-channel sends use the combined post-stream signal.
+- [x] Playback stream sends inherit parent app gain and mute, then apply stream gain and mute; app-channel sends use the combined post-stream signal.
 - [x] App, playback-stream, and capture sends can be enabled independently to multiple named outputs.
 - [x] Capture remains unsent by default, and removing or changing its source does not enable a send implicitly.
 - [x] Input listings show each input channel's output sends.
-- [x] Automated coverage demonstrates independent and additive sends for all input channel types.
+- [x] Direct playback-stream sends are off by default; app channels continue to route through the built-in speakers output.
+- [x] Automated coverage demonstrates independent and additive sends for all input channel types, including parent app processing on direct stream sends.

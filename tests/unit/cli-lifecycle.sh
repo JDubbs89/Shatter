@@ -22,7 +22,7 @@ esac
 
 inputs=$($binary --list-in)
 case "$inputs" in
-    *"Shatter inputs"*"No application playback streams have been discovered"*) ;;
+    *"Shatter inputs"*"No app streams discovered"*) ;;
     *) echo "expected an empty app channel list, got: $inputs" >&2; exit 1 ;;
 esac
 
@@ -34,7 +34,7 @@ esac
 
 all=$($binary --list-all)
 case "$all" in
-    *"No application playback streams have been discovered"*"speakers"*) ;;
+    *"No app streams discovered"*"speakers"*) ;;
     *) echo "expected both inputs and outputs in combined list, got: $all" >&2; exit 1 ;;
 esac
 
