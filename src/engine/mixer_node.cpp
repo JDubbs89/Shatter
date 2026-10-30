@@ -202,7 +202,9 @@ void PipeWireEngine::output_process(OutputChannel& output)
                             continue;
                         }
                         auto& ring = stream.audio[output_index];
-                        profile_scope.record_ring_occupancy(ring.available_frames());
+                        const auto occupancy = ring.available_frames();
+                        profile_scope.record_ring_occupancy(occupancy);
+                        profile_scope.record_app_stream_ring_occupancy(occupancy);
                         const auto consumed = ring.accumulate(channel_mix.data(), block_frames, 1.0F);
                         profile_scope.record_unfilled_mix_frames(block_frames - consumed);
                         stream.mixer_users.fetch_sub(1, std::memory_order_release);
@@ -237,6 +239,7 @@ void PipeWireEngine::output_process(OutputChannel& output)
                         }
                         if (!stream_acquired) continue;
                         auto& ring = stream.send_audio[output_index];
+                        profile_scope.record_app_stream_ring_occupancy(ring.available_frames());
                         const auto consumed = ring.read(channel_mix.data(), block_frames);
                         profile_scope.record_unfilled_mix_frames(block_frames - consumed);
                         const float stream_target = stream.muted.load(std::memory_order_relaxed)

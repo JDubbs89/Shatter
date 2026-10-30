@@ -76,6 +76,13 @@ public:
             update_max(profiler_->ring_occupancy_max_, frames);
         }
 
+        void record_app_stream_ring_occupancy(std::uint64_t frames) noexcept
+        {
+            if (profiler_ == nullptr) return;
+            profiler_->app_stream_ring_occupancy_sum_.fetch_add(frames, std::memory_order_relaxed);
+            profiler_->app_stream_ring_occupancy_samples_.fetch_add(1, std::memory_order_relaxed);
+        }
+
         void record_pipewire_time(std::uint64_t delay_ns, std::uint64_t queue_frames) noexcept
         {
             if (profiler_ == nullptr) return;
@@ -115,6 +122,8 @@ public:
         ring_occupancy_sum_.store(0, std::memory_order_relaxed);
         ring_occupancy_samples_.store(0, std::memory_order_relaxed);
         ring_occupancy_max_.store(0, std::memory_order_relaxed);
+        app_stream_ring_occupancy_sum_.store(0, std::memory_order_relaxed);
+        app_stream_ring_occupancy_samples_.store(0, std::memory_order_relaxed);
         pipewire_delay_ns_.store(0, std::memory_order_relaxed);
         pipewire_queue_frames_.store(0, std::memory_order_relaxed);
         active_.store(true, std::memory_order_release);
@@ -163,6 +172,14 @@ public:
                   << maximum_ring_frames << " frames (" << average_ring_frames * 1000.0 / 48000.0
                   << "/" << maximum_ring_frames * 1000.0 / 48000.0 << " ms)";
         append_metric(out, "Shatter input ring occupancy avg/max", occupancy.str());
+        const auto app_stream_samples = app_stream_ring_occupancy_samples_.load(std::memory_order_relaxed);
+        const double app_stream_average_frames = app_stream_samples == 0 ? 0.0 :
+            static_cast<double>(app_stream_ring_occupancy_sum_.load(std::memory_order_relaxed)) /
+                app_stream_samples;
+        std::ostringstream app_stream_latency;
+        app_stream_latency << std::fixed << std::setprecision(3)
+                           << app_stream_average_frames * 1000.0 / 48000.0 << " ms";
+        append_metric(out, "Estimated I/O Latency", app_stream_latency.str());
         std::ostringstream device_delay;
         device_delay << std::fixed << std::setprecision(3)
                      << pipewire_delay_ns_.load(std::memory_order_relaxed) / 1'000'000.0 << " ms";
@@ -249,6 +266,8 @@ private:
     std::atomic<std::uint64_t> ring_occupancy_sum_{0};
     std::atomic<std::uint64_t> ring_occupancy_samples_{0};
     std::atomic<std::uint64_t> ring_occupancy_max_{0};
+    std::atomic<std::uint64_t> app_stream_ring_occupancy_sum_{0};
+    std::atomic<std::uint64_t> app_stream_ring_occupancy_samples_{0};
     std::atomic<std::uint64_t> pipewire_delay_ns_{0};
     std::atomic<std::uint64_t> pipewire_queue_frames_{0};
     std::atomic<std::uint32_t> writers_{0};
