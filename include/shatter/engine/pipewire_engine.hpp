@@ -2,6 +2,7 @@
 
 #include "shatter/engine/audio_ring.hpp"
 #include "shatter/engine/runtime_profiler.hpp"
+#include "shatter/state/store.hpp"
 
 #include <pipewire/extensions/metadata.h>
 #include <pipewire/pipewire.h>
@@ -137,12 +138,6 @@ private:
         std::mutex completion_mutex;
         std::condition_variable completion_cv;
     };
-    struct SavedApp { std::string identity, name; float gain_db = 0.0F; bool muted = false; };
-    struct SavedStream { std::string app_identity, original_name, name; float gain_db = 0.0F; bool muted = false; };
-    bool read_config(std::string_view name, std::vector<SavedApp>& apps,
-                     std::vector<SavedStream>& streams, std::string& error) const;
-    bool write_config(std::string_view name, std::string& error) const;
-
     struct NodeInfo {
         std::uint32_t node_id = PW_ID_ANY;
         std::string media_class;
@@ -226,8 +221,8 @@ private:
     std::array<AppChannel, max_app_channels> app_channels_{};
     std::array<PlaybackStream, max_playback_streams> playback_streams_{};
     std::array<OutputChannel, max_output_channels> output_channels_{};
-    std::vector<SavedApp> saved_apps_;
-    std::vector<SavedStream> saved_streams_;
+    state::Store state_store_;
+    state::Show loaded_show_;
     CaptureChannel capture_channel_{};
     std::atomic<std::size_t> allocated_channels_{0};
     std::atomic<std::size_t> allocated_streams_{0};

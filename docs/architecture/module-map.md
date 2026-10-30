@@ -1,36 +1,44 @@
-# Planned module map
+# Module map
 
-This scaffold mirrors the design spec's layers. The `.cpp` files are placeholders, not implemented modules or stable APIs.
+This map distinguishes active implementations from planned modules. Active modules are the current ownership points; planned modules describe follow-up extraction work, not stable interfaces.
 
 ## Process and API
 
 - `src/main.cpp`: executable entry point.
-- `src/app/supervisor.cpp`: lifecycle, configuration, logging, service integration, health, and failure handling.
-- `src/api/server.cpp`: documented local API and client subscriptions. The current direction is a versioned local JSON-RPC API over a Unix-domain socket; no network listener in v1.
+- `src/app/supervisor.cpp`: command-line syntax, engine process lifecycle, and user-facing command output.
+- `src/api/server.cpp`: local Unix-socket command server and client request transport. The command protocol is private to the executable; a versioned JSON-RPC API remains planned.
 - `src/api/osc.cpp`: optional P1 OSC control surface.
 - `src/control/midi.cpp`: optional P1 MIDI and hotkey control.
 
 ## Audio and PipeWire
 
-- `src/pw/core.cpp`: PipeWire connection and observed graph model.
-- `src/pw/link_manager.cpp`: desired-versus-actual graph reconciliation.
-- `src/pw/virtual_devices.cpp`: app-facing virtual playback and capture endpoints.
-- `src/pw/rule_engine.cpp`: direction-specific app matching and routing decisions.
-- `src/engine/mixer_node.cpp`: custom realtime `pw_filter` mixer node; callback must not block, allocate, or lock.
-- `src/engine/dsp.cpp`: preallocated channel, send, bus, and matrix processing. Keep v1 DSP minimal.
-- `src/engine/fx_host.cpp`: future P1 LV2 host; not part of the initial routing/mixing proof.
+- `src/engine/pipewire_engine.cpp`: PipeWire connection and main-loop lifecycle, app/stream/capture channel state, config application, list presentation, and profiling. It remains the largest active module; channel state and table rendering are coupled to the engine and need an explicit data interface before moving.
+- `src/engine/mixer_node.cpp`: realtime input fan-out and per-output mixing callbacks. Callbacks must not block, allocate, or lock.
+- `src/engine/dsp.cpp`: planned home for reusable channel, send, bus, and matrix processing that can be expressed independently of PipeWire buffers.
+- `src/engine/fx_host.cpp`: future P1 LV2 host; not part of the initial routing and mixing proof.
 - `src/meter/meter_bus.cpp`: realtime-safe meter collection and publication to non-realtime clients.
+- `src/pw/core.cpp`: PipeWire registry callbacks and observed node/link graph updates. Connection lifecycle remains in `PipeWireEngine`.
+- `src/pw/link_manager.cpp`: observed link state, Shatter output-to-sink bookkeeping, and control-loop operations for creating, deleting, and routing output channels.
+- `src/pw/virtual_devices.cpp`: app-facing virtual playback stream registration and output stream lifecycle. Capture endpoint lifecycle remains in `PipeWireEngine`.
+- `src/pw/rule_engine.cpp`: planned direction-specific app matching and routing decisions.
 
 ## State
 
-- `src/state/store.cpp`: persistent desired mixer state, commands, validation, and change publication.
+- `src/state/store.cpp`: active show/config path validation, parsing, serialization, and atomic replacement. The engine snapshots live settings and applies loaded settings; file format concerns stay here.
 - `src/state/scenes.cpp`: future scene support; scenes are deferred from the initial release scope.
 
 ## Tests and packaging
 
-- `tests/unit/` and `tests/integration/`: planned unit and PipeWire/WirePlumber integration coverage.
+- `tests/unit/` and `tests/integration/`: unit and PipeWire/WirePlumber integration coverage.
 - `packaging/systemd/`: planned user-session service packaging.
 - `config/`: examples and documentation for user-editable rules/configuration. The schema is intentionally not invented in this scaffold.
+
+## Remaining extraction work
+
+1. Move channel state and list presentation behind explicit engine data interfaces; keep config file parsing and serialization in `state::Store`.
+2. Move capture endpoint lifecycle and route reconciliation behind explicit interfaces; current PipeWire graph callbacks and output management live under `src/pw`.
+3. Move reusable audio mixing math from the PipeWire callbacks into `dsp.cpp`, leaving buffer acquisition and release in `mixer_node.cpp`.
+4. Keep CLI parsing in `supervisor.cpp` and command dispatch/transport in `api/server.cpp`; avoid adding persistence or file-format logic back to either module.
 
 ## Early proof points
 
