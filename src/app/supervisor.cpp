@@ -15,6 +15,7 @@
 #include <string>
 #include <string_view>
 #include <sys/socket.h>
+#include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/types.h>
@@ -36,6 +37,8 @@ constexpr std::string_view kUsage =
     "       shatter set mute <app|stream> <name-or-id> <on|off>\n"
     "       shatter set capture <source|send> <value>\n"
     "       shatter rename <app|stream> <old-name> <new-name>\n"
+    "       shatter save show <name>\n"
+    "       shatter load show <name>\n"
     "       shatter help\n";
 constexpr std::string_view kEngineArgument = "--engine";
 constexpr std::string_view kStartupBanner = R"( ______     __  __     ______     ______   ______   ______     ______
@@ -208,6 +211,8 @@ int serve()
     shatter::engine::PipeWireEngine audio_engine;
     std::string audio_error;
     audio_engine.start(audio_error);
+    std::string default_config_error;
+    audio_engine.load_config("default", default_config_error);
 
     const int server_fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (server_fd < 0) {
@@ -253,10 +258,30 @@ int serve()
                     reply = "OK running audio-unavailable: " + reason + "\n";
                 }
             } else if (input == "STOP") {
-                reply = "OK stopping\n";
+                std::string save_error;
+                if (!audio_engine.save_config("default", save_error)) {
+                    reply = "ERR could not save default configuration: " + save_error + "\n";
+                } else reply = "OK stopping\n";
                 running = false;
+            } else if (input.starts_with("CONFIG-SAVE ") || input.starts_with("CONFIG-LOAD ")) {
+                std::istringstream parsed{std::string(input)};
+                std::string action, name, extra, config_error;
+                parsed >> action >> std::quoted(name);
+                const bool valid = !name.empty() && !(parsed >> extra);
+                const bool succeeded = valid && (action == "CONFIG-SAVE"
+                    ? audio_engine.save_config(name, config_error)
+                    : audio_engine.load_config(name, config_error));
+                if (!valid) reply = "ERR expected CONFIG-SAVE|CONFIG-LOAD <name>\n";
+                else if (!succeeded) reply = "ERR " + config_error + "\n";
+                else reply = "OK configuration " + name + (action == "CONFIG-SAVE" ? " saved\n" : " loaded\n");
             } else if (input == "LIST-IN") {
                 reply = audio_engine.list_inputs();
+            } else if (input.starts_with("LIST-IN ")) {
+                std::uint32_t width = 100;
+                const auto value = input.substr(8);
+                const auto [end, parse_error] = std::from_chars(value.data(), value.data() + value.size(), width);
+                if (parse_error != std::errc{} || end != value.data() + value.size()) reply = "ERR invalid terminal width\n";
+                else reply = audio_engine.list_inputs(width);
             } else if (input == "LIST-OUT") {
                 reply = audio_engine.list_outputs();
             } else if (input == "LIST-ALL") {
@@ -468,6 +493,9 @@ int run_cli(int argc, char** argv)
         normalized.emplace_back(argv[2]);
         normalized.emplace_back(argv[3]);
         normalized.emplace_back(argv[4]);
+    } else if ((arg(1) == "save" || arg(1) == "load") && argc == 4 && arg(2) == "show") {
+        normalized.emplace_back(arg(1) == "save" ? "--config-save" : "--config-load");
+        normalized.emplace_back(argv[3]);
     }
     if (normalized.size() > 1) {
         std::vector<char*> normalized_argv;
@@ -480,8 +508,13 @@ int run_cli(int argc, char** argv)
         if (argc == 2) {
             const std::string_view command(argv[1]);
             std::string_view request_command;
+            std::string dynamic_command;
             if (command == "--list-in") {
-                request_command = "LIST-IN";
+                struct winsize size{};
+                const unsigned short width = ioctl(STDOUT_FILENO, TIOCGWINSZ, &size) == 0 && size.ws_col > 0
+                    ? size.ws_col : 100;
+                dynamic_command = "LIST-IN " + std::to_string(width);
+                request_command = dynamic_command;
             } else if (command == "--list-out") {
                 request_command = "LIST-OUT";
             } else if (command == "--list-all") {
@@ -504,6 +537,18 @@ int run_cli(int argc, char** argv)
                 std::cout << response;
                 return 0;
             }
+        }
+
+        if (argc == 3 && (std::string_view(argv[1]) == "--config-save" ||
+                          std::string_view(argv[1]) == "--config-load")) {
+            std::ostringstream command;
+            command << (std::string_view(argv[1]) == "--config-save" ? "CONFIG-SAVE " : "CONFIG-LOAD ")
+                    << std::quoted(argv[2]);
+            const std::string response = request(command.str());
+            if (response.empty()) { std::cerr << "Shatter engine is unavailable; run `shatter start` first.\n"; return 1; }
+            if (response.starts_with("ERR ")) { std::cerr << response; return 1; }
+            std::cout << response;
+            return 0;
         }
 
         if (argc == 5 && std::string_view(argv[1]) == "--set-gain") {

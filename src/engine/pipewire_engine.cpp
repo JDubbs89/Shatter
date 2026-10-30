@@ -19,6 +19,9 @@
 #include <sys/resource.h>
 #include <utility>
 #include <vector>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 
 namespace shatter::engine {
 namespace {
@@ -46,6 +49,29 @@ spa_pod* build_stereo_format(spa_pod_builder* builder)
 bool stream_is_ready(pw_stream_state state)
 {
     return state == PW_STREAM_STATE_PAUSED || state == PW_STREAM_STATE_STREAMING;
+}
+
+std::string fit_column(std::string_view value, std::size_t width)
+{
+    if (value.size() <= width) return std::string(value);
+    if (width < 4) return std::string(value.substr(0, width));
+    return std::string(value.substr(0, width - 3)) + "...";
+}
+
+std::filesystem::path config_path(std::string_view name)
+{
+    const char* base = std::getenv("XDG_CONFIG_HOME");
+    std::filesystem::path root = base && *base ? base : std::filesystem::path(std::getenv("HOME") ? std::getenv("HOME") : ".") / ".config";
+    std::string filename(name);
+    if (filename.ends_with(".conf")) filename.resize(filename.size() - 5);
+    if (filename.empty() || filename == "." || filename == ".." || filename.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-.") != std::string::npos)
+        throw std::runtime_error("config name may contain only letters, digits, dot, dash, and underscore");
+    return root / "shatter" / (filename + ".conf");
+}
+
+float gain_db(float linear)
+{
+    return linear <= 0.0F ? -60.0F : std::max(-60.0F, 20.0F * std::log10(linear));
 }
 
 std::string make_channel_id(std::string_view identity)
@@ -289,20 +315,106 @@ bool PipeWireEngine::set_capture_speaker_send(bool enabled, std::string& error)
     return true;
 }
 
-std::string PipeWireEngine::list_inputs() const
+bool PipeWireEngine::read_config(std::string_view name, std::vector<SavedApp>& apps,
+                                 std::vector<SavedStream>& streams, std::string& error) const
 {
+    try {
+        std::ifstream file(config_path(name));
+        if (!file) { error = "configuration not found: " + std::string(name); return false; }
+        std::string header;
+        if (!std::getline(file, header) || header != "SHATTER-CONFIG 1") { error = "unsupported or invalid configuration format"; return false; }
+        std::string line;
+        while (std::getline(file, line)) {
+            std::istringstream row(line);
+            char type = 0;
+            if (!(row >> type)) continue;
+            if (type == 'A') {
+                SavedApp item; int muted = 0;
+                if (!(row >> std::quoted(item.identity) >> std::quoted(item.name) >> item.gain_db >> muted) ||
+                    (muted != 0 && muted != 1) || !std::isfinite(item.gain_db) || item.gain_db < kMinimumGainDb || item.gain_db > kMaximumGainDb) { error = "invalid app entry in configuration"; return false; }
+                item.muted = muted != 0;
+                apps.push_back(std::move(item));
+            } else if (type == 'S') {
+                SavedStream item; int muted = 0;
+                if (!(row >> std::quoted(item.app_identity) >> std::quoted(item.original_name) >> std::quoted(item.name) >> item.gain_db >> muted) ||
+                    (muted != 0 && muted != 1) || !std::isfinite(item.gain_db) || item.gain_db < kMinimumGainDb || item.gain_db > kMaximumGainDb) { error = "invalid stream entry in configuration"; return false; }
+                item.muted = muted != 0; streams.push_back(std::move(item));
+            } else { error = "unknown entry in configuration"; return false; }
+            std::string extra; if (row >> extra) { error = "extra data in configuration entry"; return false; }
+        }
+        return true;
+    } catch (const std::exception& exception) { error = exception.what(); return false; }
+}
+
+bool PipeWireEngine::write_config(std::string_view name, std::string& error) const
+{
+    try {
+        const auto path = config_path(name);
+        std::filesystem::create_directories(path.parent_path());
+        const auto temp = path.string() + ".tmp";
+        std::ofstream file(temp, std::ios::trunc);
+        if (!file) { error = "cannot write configuration file"; return false; }
+        file << "SHATTER-CONFIG 1\n" << std::setprecision(7);
+        std::lock_guard lock(nodes_mutex_);
+        for (std::size_t i = 0; i < allocated_channels_.load(); ++i) {
+            const auto& app = app_channels_[i]; if (!app.allocated) continue;
+            file << "A " << std::quoted(app.identity) << ' ' << std::quoted(app.name) << ' '
+                 << gain_db(app.target_gain.load()) << ' ' << (app.muted.load() ? 1 : 0) << '\n';
+        }
+        for (std::size_t i = 0; i < allocated_streams_.load(); ++i) {
+            const auto& stream = playback_streams_[i]; if (!stream.in_use) continue;
+            const auto& app = app_channels_[stream.channel_index];
+            file << "S " << std::quoted(app.identity) << ' ' << std::quoted(stream.original_name) << ' '
+                 << std::quoted(stream.name) << ' ' << gain_db(stream.target_gain.load()) << ' '
+                 << (stream.muted.load() ? 1 : 0) << '\n';
+        }
+        file.close();
+        if (!file) { error = "failed while writing configuration file"; return false; }
+        std::filesystem::rename(temp, path);
+        return true;
+    } catch (const std::exception& exception) { error = exception.what(); return false; }
+}
+
+bool PipeWireEngine::save_config(std::string_view name, std::string& error) { return write_config(name, error); }
+
+bool PipeWireEngine::load_config(std::string_view name, std::string& error)
+{
+    std::vector<SavedApp> apps; std::vector<SavedStream> streams;
+    if (!read_config(name, apps, streams, error)) return false;
+    std::lock_guard lock(nodes_mutex_);
+    saved_apps_ = std::move(apps); saved_streams_ = std::move(streams);
+    auto gain = [](float db) { return std::pow(10.0F, db / 20.0F); };
+    for (std::size_t i = 0; i < allocated_channels_.load(); ++i) for (const auto& saved : saved_apps_) {
+        auto& app = app_channels_[i]; if (app.identity == saved.identity) { app.name = saved.name; app.target_gain.store(gain(saved.gain_db)); app.muted.store(saved.muted); }
+    }
+    for (std::size_t i = 0; i < allocated_streams_.load(); ++i) for (const auto& saved : saved_streams_) {
+        auto& stream = playback_streams_[i]; if (!stream.in_use) continue;
+        const auto& app = app_channels_[stream.channel_index];
+        if (app.identity == saved.app_identity && stream.original_name == saved.original_name) {
+            stream.name = saved.name; stream.target_gain.store(gain(saved.gain_db)); stream.muted.store(saved.muted);
+        }
+    }
+    return true;
+}
+
+std::string PipeWireEngine::list_inputs(std::size_t terminal_width) const
+{
+    terminal_width = std::max<std::size_t>(72, std::min<std::size_t>(terminal_width, 240));
+    const std::size_t stream_column = terminal_width - 59;
     std::lock_guard lock(nodes_mutex_);
     std::ostringstream table;
     table << "Shatter inputs\n"
-          << std::left << std::setw(25) << "Channel ID" << std::setw(24) << "Application"
-          << "Playback stream (PipeWire node ID)\n"
-          << std::string(96, '-') << '\n';
+          << std::left << std::setw(23) << "Channel ID" << std::setw(20) << "Application"
+          << std::setw(9) << "Gain" << std::setw(7) << "Mute" << "Playback stream (PipeWire node ID)\n"
+          << std::string(terminal_width, '-') << '\n';
 
     const auto channel_count = allocated_channels_.load(std::memory_order_relaxed);
     const auto stream_count = allocated_streams_.load(std::memory_order_relaxed);
     for (std::size_t channel_index = 0; channel_index < channel_count; ++channel_index) {
         const AppChannel& channel = app_channels_[channel_index];
-        table << std::setw(25) << channel.id << std::setw(24) << channel.name;
+        table << std::setw(23) << channel.id << std::setw(20) << fit_column(channel.name, 19)
+              << std::setw(9) << (std::to_string(gain_db(channel.target_gain.load())) + " dB")
+              << std::setw(7) << (channel.muted.load() ? "yes" : "no");
         bool has_stream = false;
         for (std::size_t stream_index = 0; stream_index < stream_count; ++stream_index) {
             const PlaybackStream& stream = playback_streams_[stream_index];
@@ -310,9 +422,10 @@ std::string PipeWireEngine::list_inputs() const
                 continue;
             }
             if (has_stream) {
-                table << std::setw(25) << "" << std::setw(24) << "";
+                table << std::setw(23) << "" << std::setw(20) << "" << std::setw(9) << "" << std::setw(7) << "";
             }
-            table << stream.name << " (" << stream.node_id << ")\n";
+            const std::string suffix = " (" + std::to_string(stream.node_id) + ")";
+            table << fit_column(stream.name, stream_column > suffix.size() ? stream_column - suffix.size() : 1) << suffix << '\n';
             has_stream = true;
         }
         if (!has_stream) {
@@ -323,7 +436,9 @@ std::string PipeWireEngine::list_inputs() const
         table << "No application playback streams have been discovered\n";
     }
 
-    table << std::setw(25) << "capture" << std::setw(24) << "Microphone";
+    table << std::setw(23) << "capture" << std::setw(20) << "Microphone"
+          << std::setw(9) << (std::to_string(gain_db(capture_channel_.target_gain.load())) + " dB")
+          << std::setw(7) << (capture_channel_.muted.load() ? "yes" : "no");
     if (capture_channel_.source_node_id == PW_ID_ANY) {
         table << "No capture source selected; speaker send off\n";
     } else {
@@ -349,12 +464,14 @@ std::string PipeWireEngine::list_inputs() const
         return left.name < right.name;
     });
     for (const auto& node : capture_sources) {
-        table << std::setw(25) << "available" << std::setw(24) << "Capture source"
+        table << std::setw(23) << "available" << std::setw(20) << "Capture source"
+              << std::setw(9) << "" << std::setw(7) << ""
               << (node.name.empty() ? node.description : node.name) << " (" << node.node_id << ")"
               << (capture_channel_.source_node_id == node.node_id ? " (selected)\n" : " (available)\n");
     }
     if (capture_sources.empty()) {
-        table << std::setw(25) << "available" << std::setw(24) << "Capture source"
+        table << std::setw(23) << "available" << std::setw(20) << "Capture source"
+              << std::setw(9) << "" << std::setw(7) << ""
               << "No PipeWire capture sources found\n";
     }
     const auto unrouted_count = unrouted_playback_streams_.load(std::memory_order_relaxed);
@@ -999,7 +1116,16 @@ void PipeWireEngine::handle_playback_node(std::uint32_t node_id, NodeInfo node)
         stream->node_id = node_id;
         stream->channel_index = node.channel_index;
         stream->name = node.name.empty() ? node.description : node.name;
+        stream->original_name = stream->name;
         stream->application = node.application;
+        for (const auto& saved : saved_streams_) {
+            if (saved.app_identity == node.identity && saved.original_name == stream->original_name) {
+                stream->name = saved.name;
+                stream->target_gain.store(std::pow(10.0F, saved.gain_db / 20.0F));
+                stream->muted.store(saved.muted);
+                break;
+            }
+        }
         stream->sink_name = "shatter.stream." + std::to_string(node_id);
         stream->events.version = PW_VERSION_STREAM_EVENTS;
         stream->events.state_changed = &PipeWireEngine::on_stream_input_state_changed;
@@ -1071,6 +1197,12 @@ std::size_t PipeWireEngine::get_or_create_channel_locked(const NodeInfo& node)
     channel.id = make_channel_id(node.identity);
     channel.name = !node.application.empty() ? node.application
         : !node.process_binary.empty() ? node.process_binary : node.identity;
+    for (const auto& saved : saved_apps_) if (saved.identity == channel.identity) {
+        channel.name = saved.name;
+        channel.target_gain.store(std::pow(10.0F, saved.gain_db / 20.0F));
+        channel.muted.store(saved.muted);
+        break;
+    }
     channel_by_identity_[channel.identity] = index;
     allocated_channels_.store(current_channel_count + 1, std::memory_order_release);
     return index;

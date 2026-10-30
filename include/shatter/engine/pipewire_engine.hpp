@@ -42,7 +42,9 @@ public:
     bool set_capture_source(std::uint32_t source_node_id, std::string& error);
     bool set_capture_gain_db(float decibels, std::string& error);
     bool set_capture_speaker_send(bool enabled, std::string& error);
-    std::string list_inputs() const;
+    bool load_config(std::string_view name, std::string& error);
+    bool save_config(std::string_view name, std::string& error);
+    std::string list_inputs(std::size_t terminal_width = 100) const;
     std::string list_outputs() const;
     bool profile_start(std::string& error);
     std::string profile_stop(std::string& error);
@@ -67,6 +69,7 @@ private:
         std::uint32_t node_id = PW_ID_ANY;
         std::size_t channel_index = 0;
         std::string name;
+        std::string original_name;
         std::string application;
         std::string sink_name;
         pw_stream* sink = nullptr;
@@ -98,6 +101,11 @@ private:
         bool succeeded = false;
         std::string error;
     };
+    struct SavedApp { std::string identity, name; float gain_db = 0.0F; bool muted = false; };
+    struct SavedStream { std::string app_identity, original_name, name; float gain_db = 0.0F; bool muted = false; };
+    bool read_config(std::string_view name, std::vector<SavedApp>& apps,
+                     std::vector<SavedStream>& streams, std::string& error) const;
+    bool write_config(std::string_view name, std::string& error) const;
 
     struct NodeInfo {
         std::uint32_t node_id = PW_ID_ANY;
@@ -172,6 +180,8 @@ private:
     std::unordered_map<std::uint32_t, std::size_t> stream_by_node_;
     std::array<AppChannel, max_app_channels> app_channels_{};
     std::array<PlaybackStream, max_playback_streams> playback_streams_{};
+    std::vector<SavedApp> saved_apps_;
+    std::vector<SavedStream> saved_streams_;
     CaptureChannel capture_channel_{};
     std::atomic<std::size_t> allocated_channels_{0};
     std::atomic<std::size_t> allocated_streams_{0};
