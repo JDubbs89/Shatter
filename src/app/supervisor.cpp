@@ -1,12 +1,15 @@
 #include "shatter/app/supervisor.hpp"
+#include "shatter/engine/pipewire_engine.hpp"
 
 #include <array>
 #include <cerrno>
+#include <charconv>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -21,10 +24,13 @@
 namespace shatter::app {
 namespace {
 
-constexpr std::string_view kUsage = "Usage: shatter <start|status|stop|help>\n";
+constexpr std::string_view kUsage =
+    "Usage: shatter <start|status|stop|help>\n"
+    "       shatter --list-in|--list-out|--list-all\n"
+    "       shatter --set-gain <channel> <decibels>\n";
 constexpr std::string_view kEngineArgument = "--engine";
 
-std::string socket_path()
+std::string prepare_control_socket_path()
 {
     const char* runtime_dir = std::getenv("XDG_RUNTIME_DIR");
     if (runtime_dir == nullptr || *runtime_dir == '\0') {
@@ -72,7 +78,7 @@ int connect_to_engine(const std::string& path)
 
 std::string request(std::string_view command)
 {
-    const int fd = connect_to_engine(socket_path());
+    const int fd = connect_to_engine(prepare_control_socket_path());
     if (fd < 0) {
         return {};
     }
@@ -82,20 +88,31 @@ std::string request(std::string_view command)
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
 
     const std::string message = std::string(command) + "\n";
-    const ssize_t sent = send(fd, message.data(), message.size(), MSG_NOSIGNAL);
-    if (sent != static_cast<ssize_t>(message.size())) {
-        close(fd);
-        return {};
+    std::size_t sent = 0;
+    while (sent < message.size()) {
+        const ssize_t result = send(fd, message.data() + sent, message.size() - sent, MSG_NOSIGNAL);
+        if (result <= 0) {
+            close(fd);
+            return {};
+        }
+        sent += static_cast<std::size_t>(result);
     }
 
-    std::array<char, 256> response{};
-    const ssize_t received = recv(fd, response.data(), response.size() - 1, 0);
+    std::string response;
+    std::array<char, 4096> buffer{};
+    while (response.size() < 65536) {
+        const ssize_t received = recv(fd, buffer.data(), buffer.size(), 0);
+        if (received <= 0) {
+            break;
+        }
+        response.append(buffer.data(), static_cast<std::size_t>(received));
+        if (response.ends_with(".\n")) {
+            response.resize(response.size() - 2);
+            break;
+        }
+    }
     close(fd);
-    if (received <= 0) {
-        return {};
-    }
-
-    return std::string(response.data(), static_cast<std::size_t>(received));
+    return response;
 }
 
 bool is_running()
@@ -135,7 +152,7 @@ int start_engine(const char* executable)
         _exit(127);
     }
 
-    for (int attempt = 0; attempt < 100; ++attempt) {
+    for (int attempt = 0; attempt < 400; ++attempt) {
         if (is_running()) {
             std::cout << "Shatter engine started.\n";
             return 0;
@@ -149,7 +166,7 @@ int start_engine(const char* executable)
 
 int serve()
 {
-    const std::string path = socket_path();
+    const std::string path = prepare_control_socket_path();
     struct stat existing {};
     if (lstat(path.c_str(), &existing) == 0) {
         if (!S_ISSOCK(existing.st_mode) || existing.st_uid != getuid()) {
@@ -172,6 +189,10 @@ int serve()
             return 1;
         }
     }
+
+    shatter::engine::PipeWireEngine audio_engine;
+    std::string audio_error;
+    audio_engine.start(audio_error);
 
     const int server_fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (server_fd < 0) {
@@ -202,20 +223,58 @@ int serve()
 
         std::array<char, 64> command{};
         const ssize_t received = recv(client_fd, command.data(), command.size() - 1, 0);
-        std::string_view reply = "ERR invalid command\n";
+        std::string reply = "ERR invalid command\n";
         if (received > 0) {
             std::string_view input(command.data(), static_cast<std::size_t>(received));
             if (!input.empty() && input.back() == '\n') {
                 input.remove_suffix(1);
             }
             if (input == "PING") {
-                reply = "OK running\n";
+                if (audio_engine.available()) {
+                    reply = "OK running audio-ready\n";
+                } else {
+                    const std::string reason = audio_error.empty()
+                        ? "speaker output is disconnected" : audio_error;
+                    reply = "OK running audio-unavailable: " + reason + "\n";
+                }
             } else if (input == "STOP") {
                 reply = "OK stopping\n";
                 running = false;
+            } else if (input == "LIST-IN") {
+                reply = audio_engine.list_inputs();
+            } else if (input == "LIST-OUT") {
+                reply = audio_engine.list_outputs();
+            } else if (input == "LIST-ALL") {
+                reply = audio_engine.list_inputs() + "\n" + audio_engine.list_outputs();
+            } else if (input.starts_with("GAIN ")) {
+                std::istringstream parsed{std::string(input)};
+                std::string action;
+                std::string channel;
+                float decibels = 0.0F;
+                std::string extra;
+                if (!(parsed >> action >> channel >> decibels) || (parsed >> extra)) {
+                    reply = "ERR expected GAIN <channel> <decibels>\n";
+                } else if (channel != "app-playback") {
+                    reply = "ERR unknown input channel: " + channel + "\n";
+                } else {
+                    std::string gain_error;
+                    if (audio_engine.set_app_gain_db(decibels, gain_error)) {
+                        reply = "OK app-playback gain set to " + std::to_string(decibels) + " dB\n";
+                    } else {
+                        reply = "ERR " + gain_error + "\n";
+                    }
+                }
             }
         }
-        send(client_fd, reply.data(), reply.size(), MSG_NOSIGNAL);
+        reply += ".\n";
+        std::size_t sent = 0;
+        while (sent < reply.size()) {
+            const ssize_t result = send(client_fd, reply.data() + sent, reply.size() - sent, MSG_NOSIGNAL);
+            if (result <= 0) {
+                break;
+            }
+            sent += static_cast<std::size_t>(result);
+        }
         close(client_fd);
     }
 
@@ -247,6 +306,53 @@ int run_cli(int argc, char** argv)
     }
 
     try {
+        if (argc == 2) {
+            const std::string_view command(argv[1]);
+            std::string_view request_command;
+            if (command == "--list-in") {
+                request_command = "LIST-IN";
+            } else if (command == "--list-out") {
+                request_command = "LIST-OUT";
+            } else if (command == "--list-all") {
+                request_command = "LIST-ALL";
+            }
+            if (!request_command.empty()) {
+                const std::string response = request(request_command);
+                if (response.empty()) {
+                    std::cerr << "Shatter engine is unavailable; run `shatter start` first.\n";
+                    return 1;
+                }
+                if (response.starts_with("ERR ")) {
+                    std::cerr << response;
+                    return 1;
+                }
+                std::cout << response;
+                return 0;
+            }
+        }
+
+        if (argc == 4 && std::string_view(argv[1]) == "--set-gain") {
+            float decibels = 0.0F;
+            const std::string_view value(argv[3]);
+            const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), decibels);
+            if (error != std::errc{} || end != value.data() + value.size()) {
+                std::cerr << "Gain must be a number in dB.\n";
+                return 2;
+            }
+            const std::string command = "GAIN " + std::string(argv[2]) + " " + std::to_string(decibels);
+            const std::string response = request(command);
+            if (response.empty()) {
+                std::cerr << "Shatter engine is unavailable; run `shatter start` first.\n";
+                return 1;
+            }
+            if (response.starts_with("ERR ")) {
+                std::cerr << response;
+                return 1;
+            }
+            std::cout << response;
+            return 0;
+        }
+
         if (argc != 2) {
             std::cerr << kUsage;
             return 2;
@@ -257,7 +363,14 @@ int run_cli(int argc, char** argv)
             return start_engine(argv[0]);
         }
         if (command == "status") {
-            std::cout << (is_running() ? "Shatter engine is running.\n" : "Shatter engine is stopped.\n");
+            const std::string response = request("PING");
+            if (response.starts_with("OK running audio-ready")) {
+                std::cout << "Shatter engine is running; PipeWire audio is ready.\n";
+            } else if (response.starts_with("OK running audio-unavailable:")) {
+                std::cout << "Shatter engine is running; " << response.substr(std::string("OK running ").size());
+            } else {
+                std::cout << "Shatter engine is stopped.\n";
+            }
             return 0;
         }
         if (command == "stop") {

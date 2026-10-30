@@ -20,6 +20,29 @@ case "$running" in
     *) echo "expected running status, got: $running" >&2; exit 1 ;;
 esac
 
+inputs=$($binary --list-in)
+case "$inputs" in
+    *"app-playback"*"shatter.app_playback"*) ;;
+    *) echo "expected app playback input in list, got: $inputs" >&2; exit 1 ;;
+esac
+
+outputs=$($binary --list-out)
+case "$outputs" in
+    *"speakers"*"shatter.speakers"*) ;;
+    *) echo "expected speakers output in list, got: $outputs" >&2; exit 1 ;;
+esac
+
+all=$($binary --list-all)
+case "$all" in
+    *"app-playback"*"speakers"*) ;;
+    *) echo "expected both inputs and outputs in combined list, got: $all" >&2; exit 1 ;;
+esac
+
+if $binary --set-gain app-playback -6 >/dev/null 2>&1; then
+    echo "expected gain change to report unavailable PipeWire audio" >&2
+    exit 1
+fi
+
 $binary start
 $binary stop
 stopped=$($binary status)
