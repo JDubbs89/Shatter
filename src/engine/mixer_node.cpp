@@ -11,6 +11,7 @@ namespace {
 
 constexpr std::uint32_t kSampleRate = 48000;
 constexpr std::uint32_t kChannels = 2;
+constexpr std::uint32_t kShutdownFadeFrames = kSampleRate / 4;
 constexpr std::uint32_t kMixerClosed = 1U << 31U;
 constexpr std::uint32_t kMixerUserMask = kMixerClosed - 1U;
 
@@ -280,6 +281,22 @@ void PipeWireEngine::output_process(OutputChannel& output)
                             samples[output_offset + sample] += channel_mix[sample];
                     }
                     capture_channel_.mixer_users.fetch_sub(1, std::memory_order_release);
+                }
+            }
+
+            if (shutdown_fade_requested_.load(std::memory_order_acquire)) {
+                if (output.shutdown_fade_frames_remaining == 0 && output.shutdown_fade_gain > 0.0F)
+                    output.shutdown_fade_frames_remaining = kShutdownFadeFrames;
+                const float fade_step = 1.0F / static_cast<float>(kShutdownFadeFrames);
+                for (std::size_t frame = 0; frame < frames; ++frame) {
+                    const float gain = output.shutdown_fade_frames_remaining == 0
+                        ? 0.0F : output.shutdown_fade_gain;
+                    samples[frame * kChannels] *= gain;
+                    samples[frame * kChannels + 1] *= gain;
+                    if (output.shutdown_fade_frames_remaining > 0) {
+                        output.shutdown_fade_gain = std::max(0.0F, output.shutdown_fade_gain - fade_step);
+                        --output.shutdown_fade_frames_remaining;
+                    }
                 }
             }
             data.chunk->offset = 0;

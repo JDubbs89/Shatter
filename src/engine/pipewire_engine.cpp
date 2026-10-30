@@ -554,6 +554,29 @@ bool PipeWireEngine::available() const noexcept
     return available_ && output_linked_.load(std::memory_order_relaxed);
 }
 
+void PipeWireEngine::begin_shutdown_fade() noexcept
+{
+    shutdown_fade_requested_.store(true, std::memory_order_release);
+}
+
+void PipeWireEngine::pause_streams_for_shutdown() noexcept
+{
+    for (auto& stream : playback_streams_) {
+        if (stream.sink == nullptr) continue;
+        pw_stream_set_active(stream.sink, false);
+        pw_stream_flush(stream.sink, false);
+    }
+    if (capture_channel_.source_stream != nullptr) {
+        pw_stream_set_active(capture_channel_.source_stream, false);
+        pw_stream_flush(capture_channel_.source_stream, false);
+    }
+    for (auto& output : output_channels_) {
+        if (output.stream == nullptr) continue;
+        pw_stream_set_active(output.stream, false);
+        pw_stream_flush(output.stream, false);
+    }
+}
+
 namespace {
 
 std::uint64_t timeval_to_microseconds(const timeval& value)

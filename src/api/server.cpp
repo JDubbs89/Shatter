@@ -209,6 +209,10 @@ int run_server()
                 else if (!audio_engine.save_config(startup_show, save_error))
                     reply = "ERR could not save default show '" + startup_show + "': " + save_error + "\n";
                 else reply = "OK stopping\n";
+                audio_engine.begin_shutdown_fade();
+                std::this_thread::sleep_for(std::chrono::milliseconds(300));
+                audio_engine.pause_streams_for_shutdown();
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
                 running = false;
             } else if (input.starts_with("CONFIG-SAVE ") || input.starts_with("CONFIG-LOAD ")) {
                 std::istringstream parsed{std::string(input)};

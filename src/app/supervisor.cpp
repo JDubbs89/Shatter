@@ -30,6 +30,7 @@ namespace {
 
 constexpr std::string_view kUsage =
     "Usage: shatter start [engine|profile]\n"
+    "       shatter restart\n"
     "       shatter status [engine]\n"
     "       shatter stop [engine|profile]\n"
     "       shatter list <in|out|all>\n"
@@ -105,6 +106,27 @@ int start_engine(const char* executable)
 
     std::cerr << "Shatter engine did not become ready. Check that XDG_RUNTIME_DIR is available.\n";
     return 1;
+}
+
+int restart_engine(const char* executable)
+{
+    const std::string response = shatter::api::request("STOP");
+    if (response.starts_with("OK stopping")) {
+        bool stopped = false;
+        for (int attempt = 0; attempt < 400; ++attempt) {
+            if (!is_running()) {
+                stopped = true;
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        if (!stopped) {
+            std::cerr << "Shatter engine did not stop; restart aborted.\n";
+            return 1;
+        }
+        std::cout << "Shatter engine stopped.\n";
+    }
+    return start_engine(executable);
 }
 
 
@@ -433,6 +455,9 @@ int run_cli(int argc, char** argv)
         const std::string_view command(argv[1]);
         if (command == "start") {
             return start_engine(argv[0]);
+        }
+        if (command == "restart") {
+            return restart_engine(argv[0]);
         }
         if (command == "status") {
             const std::string response = shatter::api::request("PING");

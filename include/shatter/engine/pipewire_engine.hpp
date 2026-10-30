@@ -61,6 +61,8 @@ public:
     bool profile_start(std::string& error);
     std::string profile_stop(std::string& error);
     bool available() const noexcept;
+    void begin_shutdown_fade() noexcept;
+    void pause_streams_for_shutdown() noexcept;
 
 private:
     struct AppChannel {
@@ -126,6 +128,8 @@ private:
         std::array<std::uint32_t, 8> assigned_sink_node_ids{};
         std::array<std::string, 8> assigned_sink_names{};
         std::size_t assigned_sink_count = 0;
+        float shutdown_fade_gain = 1.0F;
+        std::uint32_t shutdown_fade_frames_remaining = 0;
         pw_stream* stream = nullptr;
         spa_hook listener{};
         pw_stream_events events{};
@@ -255,6 +259,7 @@ private:
     std::atomic<bool> output_linked_{false};
     float smoothed_gain_ = 1.0F;
     RuntimeProfiler profiler_;
+    std::atomic<bool> shutdown_fade_requested_{false};
     std::atomic<bool> profile_running_{false};
     std::chrono::steady_clock::time_point profile_started_{};
     std::uint64_t profile_user_cpu_us_ = 0;

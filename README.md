@@ -36,6 +36,7 @@ The background engine discovers application playback streams and assigns each st
 
 ```sh
 shatter start
+shatter restart
 shatter status
 shatter stop
 shatter list in
