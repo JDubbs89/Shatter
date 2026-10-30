@@ -33,6 +33,12 @@ constexpr std::string_view kUsage =
     "       shatter --set-mute app <channel-id> <on|off>\n"
     "       shatter --set-mute stream <pipewire-node-id> <on|off>\n";
 constexpr std::string_view kEngineArgument = "--engine";
+constexpr std::string_view kStartupBanner = R"( ______     __  __     ______     ______   ______   ______     ______
+╱╲  ___╲   ╱╲ ╲_╲ ╲   ╱╲  __ ╲   ╱╲__  _╲ ╱╲__  _╲ ╱╲  ___╲   ╱╲  == ╲
+╲ ╲___  ╲  ╲ ╲  __ ╲  ╲ ╲  __ ╲  ╲╱_╱╲ ╲╱ ╲╱_╱╲ ╲╱ ╲ ╲  __╲   ╲ ╲  __<
+ ╲╱╲_____╲  ╲ ╲_╲ ╲_╲  ╲ ╲_╲ ╲_╲    ╲ ╲_╲    ╲ ╲_╲  ╲ ╲_____╲  ╲ ╲_╲ ╲_╲
+  ╲╱_____╱   ╲╱_╱╲╱_╱   ╲╱_╱╲╱_╱     ╲╱_╱     ╲╱_╱   ╲╱_____╱   ╲╱_╱ ╱_╱
+                                                                        )";
 
 std::string prepare_control_socket_path()
 {
@@ -158,7 +164,7 @@ int start_engine(const char* executable)
 
     for (int attempt = 0; attempt < 400; ++attempt) {
         if (is_running()) {
-            std::cout << "Shatter engine started.\n";
+            std::cout << kStartupBanner << "\nShatter engine started.\n";
             return 0;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
