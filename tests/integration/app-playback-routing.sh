@@ -75,19 +75,20 @@ fi
 wpctl set-default "$sink_id" >/dev/null
 
 python3 - "$test_root/sine.wav" "$test_root/sine-other.wav" <<'PY'
-import math
+import random
 import struct
 import sys
 import wave
 
 rate = 48000
-for path, frequency in ((sys.argv[1], 440), (sys.argv[2], 880)):
+for path, seed in ((sys.argv[1], 440), (sys.argv[2], 880)):
+    random.seed(seed)
     with wave.open(path, "wb") as output:
         output.setnchannels(2)
         output.setsampwidth(2)
         output.setframerate(rate)
         for frame in range(rate * 20):
-            sample = int(8000 * math.sin(2 * math.pi * frequency * frame / rate))
+            sample = random.randint(-8000, 8000)
             output.writeframesraw(struct.pack("<hh", sample, sample))
 PY
 
@@ -167,6 +168,29 @@ record_monitor()
     wait "$record_pid" || [ -s "$destination" ]
 }
 
+audio_rms()
+{
+    python3 - "$1" <<'PY'
+import math
+import struct
+import sys
+
+raw = open(sys.argv[1], "rb").read()
+samples = struct.unpack("<%df" % (len(raw) // 4), raw)
+rms = math.sqrt(sum(sample * sample for sample in samples) / len(samples)) if samples else 0.0
+print(rms)
+PY
+}
+
+assert_audio_rms_at_least()
+{
+    rms=$(audio_rms "$1")
+    awk -v rms="$rms" -v threshold="$2" 'BEGIN { exit !(rms >= threshold) }' || {
+        echo "$3: rms=$rms threshold=$2" >&2
+        return 1
+    }
+}
+
 sleep 1
 record_monitor "$test_root/baseline.raw" 96000
 "$binary" --set-gain app "$app_a_id" -20
@@ -205,8 +229,7 @@ fi
 "$binary" make out "Headphone Monitor"
 "$binary" assign out "Headphone Monitor" "sink-$headphones_sink_id"
 "$binary" assign app "$app_a_id" "Headphone Monitor"
-"$binary" unassign app "$app_a_id" speakers
-"$binary" unassign stream "$stream_a_id" speakers
+"$binary" --set-gain stream "$stream_a_id" 0
 sleep 0.3
 output_listing=$("$binary" --list-out)
 case "$output_listing" in
@@ -214,17 +237,24 @@ case "$output_listing" in
     *) echo "named output sink link is missing: $output_listing" >&2; pw-link -l >&2; exit 1 ;;
 esac
 record_monitor "$test_root/named-output.raw" 96000 shatter-test-headphones
-python3 - "$test_root/named-output.raw" <<'PY'
-import math
-import struct
-import sys
-
-raw = open(sys.argv[1], "rb").read()
-samples = struct.unpack("<%df" % (len(raw) // 4), raw)
-rms = math.sqrt(sum(sample * sample for sample in samples) / len(samples)) if samples else 0.0
-if rms < 0.005:
-    raise SystemExit("assigned app channel produced no audio at the named output sink: rms=%s" % rms)
-PY
+assert_audio_rms_at_least "$test_root/named-output.raw" 0.005 \
+    "assigned app channel produced no audio at the named output sink"
+"$binary" assign stream "$stream_a_id" "Headphone Monitor"
+sleep 0.3
+record_monitor "$test_root/app-and-stream-output.raw" 96000 shatter-test-headphones
+app_and_stream_rms=$(audio_rms "$test_root/app-and-stream-output.raw")
+app_only_rms=$(audio_rms "$test_root/named-output.raw")
+awk -v combined="$app_and_stream_rms" -v app_only="$app_only_rms" \
+    'BEGIN { exit !(combined >= app_only * 1.2) }' || {
+    echo "direct stream send did not add signal to the app send: app_only=$app_only_rms combined=$app_and_stream_rms" >&2
+    exit 1
+}
+"$binary" unassign app "$app_a_id" "Headphone Monitor"
+sleep 0.3
+record_monitor "$test_root/stream-only-output.raw" 96000 shatter-test-headphones
+assert_audio_rms_at_least "$test_root/stream-only-output.raw" 0.005 \
+    "stream send stopped when its independent app send was removed"
+"$binary" assign app "$app_a_id" "Headphone Monitor"
 "$binary" assign out "Headphone Monitor" "sink-$sink_id"
 sleep 0.3
 pw-link -l >&2
@@ -273,7 +303,6 @@ case "$output_row" in
 esac
 "$binary" unassign app "$app_a_id" "Headphone Monitor"
 "$binary" delete out "Headphone Monitor"
-"$binary" assign app "$app_a_id" speakers
 output_listing=$("$binary" --list-out)
 case "$output_listing" in
     *"Headphone Monitor"*) echo "deleted output channel remained in the output list: $output_listing" >&2; exit 1 ;;

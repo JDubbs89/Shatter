@@ -4,12 +4,12 @@
 
 **Blocked by:** 02: Route app channels through named output channels.
 
-**Status:** ready-for-agent
+**Status:** ready-for-human
 
-- [ ] `shatter assign stream <input-selector> <output-selector>` and `unassign` manage a playback stream's send.
-- [ ] `shatter assign capture <input-selector> <output-selector>` and `unassign` manage the capture channel's send.
-- [ ] Playback stream sends tap stream audio before app-channel gain; app-channel sends use the combined post-stream signal.
-- [ ] App, playback-stream, and capture sends can be enabled independently to multiple named outputs.
-- [ ] Capture remains unsent by default, and removing or changing its source does not enable a send implicitly.
-- [ ] Input listings show each input channel's output sends.
-- [ ] Automated coverage demonstrates independent and additive sends for all input channel types.
+- [x] `shatter assign stream <input-selector> <output-selector>` and `unassign` manage a playback stream's send.
+- [x] `shatter assign capture <input-selector> <output-selector>` and `unassign` manage the capture channel's send.
+- [x] Playback stream sends tap stream audio before app-channel gain; app-channel sends use the combined post-stream signal.
+- [x] App, playback-stream, and capture sends can be enabled independently to multiple named outputs.
+- [x] Capture remains unsent by default, and removing or changing its source does not enable a send implicitly.
+- [x] Input listings show each input channel's output sends.
+- [x] Automated coverage demonstrates independent and additive sends for all input channel types.

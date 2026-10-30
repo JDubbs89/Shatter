@@ -83,6 +83,8 @@ fi
 
 "$binary" start
 engine_running=1
+"$binary" make out "Capture Monitor"
+"$binary" assign out "Capture Monitor" "sink-$sink_id"
 inputs=$($binary --list-in)
 case "$inputs" in
     *"Capture source"*"shatter-test-mic-source ($source_id)"*) ;;
@@ -124,14 +126,25 @@ record_monitor()
 }
 
 record_monitor "$test_root/send-off.raw"
-"$binary" --set-capture-send on
+"$binary" assign capture capture speakers
 sleep 0.25
 record_monitor "$test_root/send-on.raw"
+"$binary" assign capture capture "Capture Monitor"
+sleep 0.25
+record_monitor "$test_root/two-sends.raw"
+"$binary" unassign capture capture speakers
+sleep 0.25
+record_monitor "$test_root/named-send-only.raw"
+"$binary" unassign capture capture "Capture Monitor"
+sleep 0.25
+record_monitor "$test_root/all-sends-off.raw"
+"$binary" assign capture capture speakers
 "$binary" --set-capture-gain -20
 sleep 0.25
 record_monitor "$test_root/attenuated.raw"
 
-python3 - "$test_root/send-off.raw" "$test_root/send-on.raw" "$test_root/attenuated.raw" <<'PY'
+python3 - "$test_root/send-off.raw" "$test_root/send-on.raw" "$test_root/two-sends.raw" \
+    "$test_root/named-send-only.raw" "$test_root/all-sends-off.raw" "$test_root/attenuated.raw" <<'PY'
 import math
 import struct
 import sys
@@ -141,11 +154,17 @@ def rms(path):
     samples = struct.unpack("<%df" % (len(raw) // 4), raw)
     return math.sqrt(sum(sample * sample for sample in samples) / len(samples)) if samples else 0.0
 
-off, on, attenuated = [rms(path) for path in sys.argv[1:]]
+off, on, two_sends, named_only, all_off, attenuated = [rms(path) for path in sys.argv[1:]]
 if off > 0.001:
     raise SystemExit("capture speaker send was audible while disabled: rms=%s" % off)
 if on < 0.05:
     raise SystemExit("enabling capture speaker send produced no audible signal: rms=%s" % on)
+if two_sends < on * 1.2:
+    raise SystemExit("capture send to a second output did not add signal: one=%s two=%s" % (on, two_sends))
+if named_only < 0.05:
+    raise SystemExit("capture send stopped after independently unassigning speakers: rms=%s" % named_only)
+if all_off > 0.001:
+    raise SystemExit("capture remained audible after unassigning all outputs: rms=%s" % all_off)
 if not on * 0.08 < attenuated < on * 0.12:
     raise SystemExit("capture gain did not attenuate the microphone signal by 20 dB: on=%s attenuated=%s" %
                      (on, attenuated))

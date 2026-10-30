@@ -7,21 +7,18 @@
 
 #include <algorithm>
 #include <array>
-#include <cmath>
 #include <cstdint>
 
 namespace {
 
 constexpr std::uint32_t kRate = 48000;
 constexpr std::uint32_t kChannels = 2;
-constexpr double kTau = 6.28318530717958647692;
-
 struct TestSource {
     pw_main_loop* main_loop = nullptr;
     pw_stream* stream = nullptr;
     spa_hook listener{};
     pw_stream_events events{};
-    double phase = 0.0;
+    std::uint32_t noise_state = 0x6d2b79f5U;
 };
 
 void process(void* data)
@@ -39,13 +36,13 @@ void process(void* data)
     const auto requested = buffer->requested == 0 ? capacity : static_cast<std::size_t>(buffer->requested);
     const auto frames = std::min(capacity, requested);
     auto* samples = static_cast<float*>(audio.data);
-    constexpr double increment = kTau * 440.0 / kRate;
     for (std::size_t frame = 0; frame < frames; ++frame) {
-        const float sample = static_cast<float>(0.25 * std::sin(source.phase));
+        source.noise_state ^= source.noise_state << 13U;
+        source.noise_state ^= source.noise_state >> 17U;
+        source.noise_state ^= source.noise_state << 5U;
+        const float sample = static_cast<float>(source.noise_state & 0xffffU) / 65535.0F * 0.5F - 0.25F;
         samples[frame * 2] = sample;
         samples[frame * 2 + 1] = sample;
-        source.phase += increment;
-        if (source.phase >= kTau) source.phase -= kTau;
     }
     audio.chunk->offset = 0;
     audio.chunk->stride = sizeof(float) * kChannels;
