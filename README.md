@@ -1,4 +1,4 @@
-# pwmixd
+# Shatter
 
 A single-user Linux desktop mixer daemon for persistent application and device routing. The initial target is Fedora with PipeWire; JACK applications are in scope when running through PipeWire's JACK compatibility layer.
 
