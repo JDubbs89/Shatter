@@ -349,6 +349,16 @@ std::string PipeWireEngine::list_inputs(std::size_t terminal_width) const
 
     const auto channel_count = allocated_channels_.load(std::memory_order_relaxed);
     const auto stream_count = allocated_streams_.load(std::memory_order_relaxed);
+    const auto append_sends = [&table, this](std::uint32_t mask) {
+        table << " sends: ";
+        bool first = true;
+        for (std::size_t i = 0; i < output_channels_.size(); ++i) {
+            if ((mask & (1U << i)) == 0 || !output_channels_[i].in_use) continue;
+            table << (first ? "" : ", ") << output_channels_[i].name;
+            first = false;
+        }
+        if (first) table << "off";
+    };
     for (std::size_t channel_index = 0; channel_index < channel_count; ++channel_index) {
         const AppChannel& channel = app_channels_[channel_index];
         table << std::setw(23) << channel.id << std::setw(20) << fit_column(channel.name, 19)
@@ -364,12 +374,19 @@ std::string PipeWireEngine::list_inputs(std::size_t terminal_width) const
                 table << std::setw(23) << "" << std::setw(20) << "" << std::setw(9) << "" << std::setw(7) << "";
             }
             const std::string suffix = " (" + std::to_string(stream.node_id) + ")";
-            table << fit_column(stream.name, stream_column > suffix.size() ? stream_column - suffix.size() : 1) << suffix << '\n';
+            table << fit_column(stream.name, stream_column > suffix.size() ? stream_column - suffix.size() : 1) << suffix;
+            table << '\n';
+            table << "  playback stream";
+            append_sends(stream.output_mask.load(std::memory_order_relaxed));
+            table << '\n';
             has_stream = true;
         }
         if (!has_stream) {
             table << "no active playback streams\n";
         }
+        table << "  app channel";
+        append_sends(channel.output_mask.load(std::memory_order_relaxed));
+        table << '\n';
     }
     if (channel_count == 0) {
         table << "No application playback streams have been discovered\n";
@@ -387,9 +404,15 @@ std::string PipeWireEngine::list_inputs(std::size_t terminal_width) const
             : source->second.name.empty() ? source->second.description : source->second.name;
         table << source_name << " (" << capture_channel_.source_node_id << ") ("
               << (capture_channel_.active.load(std::memory_order_relaxed) ? "connected" : "connecting")
-              << "; speaker send "
-              << ((capture_channel_.output_mask.load(std::memory_order_relaxed) & 1U) != 0 ? "on" : "off")
-              << ")\n";
+              << "; sends ";
+        const auto mask = capture_channel_.output_mask.load(std::memory_order_relaxed);
+        bool first = true;
+        for (std::size_t i = 0; i < output_channels_.size(); ++i) {
+            if ((mask & (1U << i)) == 0 || !output_channels_[i].in_use) continue;
+            table << (first ? "" : ", ") << output_channels_[i].name;
+            first = false;
+        }
+        table << (first ? "off" : "") << ")\n";
     }
 
     std::vector<NodeInfo> capture_sources;
@@ -443,18 +466,17 @@ std::string PipeWireEngine::list_outputs(std::size_t terminal_width) const
         else table << std::setw(static_cast<int>(id_width)) << output.node_id;
         table << std::setw(static_cast<int>(node_width)) << fit_column(output.node_name, node_width - 1);
         std::string assigned_sinks;
-        std::vector<std::uint32_t> listed_sink_ids;
-        for (const auto& [link_id, link] : links_) {
-            (void)link_id;
-            if (link.output_node != output.node_id) continue;
-            const auto target = nodes_.find(link.input_node);
-            if (target == nodes_.end() || target->second.media_class != "Audio/Sink" ||
-                target->second.name.starts_with("shatter.stream.")) continue;
-            if (std::find(listed_sink_ids.begin(), listed_sink_ids.end(), link.input_node) != listed_sink_ids.end()) continue;
-            listed_sink_ids.push_back(link.input_node);
+        for (std::size_t i = 0; i < output.assigned_sink_count; ++i) {
             if (!assigned_sinks.empty()) assigned_sinks += ", ";
-            assigned_sinks += (target->second.name.empty() ? target->second.description : target->second.name) +
-                              " (sink-" + std::to_string(link.input_node) + ")";
+            const auto node_id = output.assigned_sink_node_ids[i];
+            if (node_id == PW_ID_ANY) {
+                assigned_sinks += output.assigned_sink_names[i] + " (reconnecting)";
+            } else {
+                const auto target = nodes_.find(node_id);
+                const std::string& name = target == nodes_.end() ? output.assigned_sink_names[i] :
+                    (target->second.name.empty() ? target->second.description : target->second.name);
+                assigned_sinks += name + " (sink-" + std::to_string(node_id) + ")";
+            }
         }
         if (assigned_sinks.empty()) assigned_sinks = "not assigned";
         if (output.node_name == kSpeakerStreamName) assigned_sinks += " [default]";
@@ -821,7 +843,7 @@ void PipeWireEngine::cleanup()
         auto& output = output_channels_[index];
         if (output.stream != nullptr) destroy_output_stream(output);
         output.node_id = PW_ID_ANY;
-        output.sink_node_id.store(PW_ID_ANY, std::memory_order_release);
+        output.sink_count = 0;
         output.linked.store(false, std::memory_order_release);
         output.in_use = index == 0;
     }

@@ -6,6 +6,7 @@
 
 #include <pipewire/extensions/metadata.h>
 #include <pipewire/pipewire.h>
+#include <pipewire/proxy.h>
 
 #include <array>
 #include <atomic>
@@ -50,6 +51,8 @@ public:
                             std::string& error);
     bool assign_app_output(std::string_view app_selector, std::string_view output_selector, bool assigned,
                            std::string& error);
+    bool assign_input_output(std::string_view scope, std::string_view input_selector,
+                             std::string_view output_selector, bool assigned, std::string& error);
     bool load_config(std::string_view name, std::string& error);
     bool save_config(std::string_view name, std::string& error);
     std::string list_inputs(std::size_t terminal_width = 100) const;
@@ -86,8 +89,10 @@ private:
         pw_stream_events events{};
         std::atomic<float> target_gain{1.0F};
         std::atomic<bool> muted{false};
+        std::atomic<std::uint32_t> output_mask{1};
         float smoothed_gain = 1.0F;
         std::array<AudioRingBuffer, max_output_channels> audio;
+        std::array<AudioRingBuffer, max_output_channels> send_audio;
     };
 
     struct CaptureChannel {
@@ -114,7 +119,11 @@ private:
         std::string name;
         std::string node_name;
         std::uint32_t node_id = PW_ID_ANY;
-        std::atomic<std::uint32_t> sink_node_id{PW_ID_ANY};
+        std::array<std::uint32_t, 8> sink_node_ids{};
+        std::size_t sink_count = 0;
+        std::array<std::uint32_t, 8> assigned_sink_node_ids{};
+        std::array<std::string, 8> assigned_sink_names{};
+        std::size_t assigned_sink_count = 0;
         pw_stream* stream = nullptr;
         spa_hook listener{};
         pw_stream_events events{};
@@ -128,7 +137,7 @@ private:
     };
     struct OutputRequest {
         PipeWireEngine* engine = nullptr;
-        enum class Action { make, remove, assign_sink, assign_app } action = Action::make;
+        enum class Action { make, remove, assign_sink, assign_app, assign_input } action = Action::make;
         std::string first;
         std::string second;
         bool assigned = false;
@@ -152,6 +161,17 @@ private:
     struct LinkInfo {
         std::uint32_t output_node = PW_ID_ANY;
         std::uint32_t input_node = PW_ID_ANY;
+    };
+    struct PortInfo {
+        std::uint32_t node_id = PW_ID_ANY;
+        std::uint32_t port_id = PW_ID_ANY;
+        std::string name;
+        bool input = false;
+    };
+    struct ManagedLink {
+        std::uint32_t output_node = PW_ID_ANY;
+        std::uint32_t sink_node = PW_ID_ANY;
+        pw_proxy* proxy = nullptr;
     };
 
     static void on_output_state_changed(void* data, pw_stream_state old_state,
@@ -216,6 +236,8 @@ private:
     mutable std::mutex nodes_mutex_;
     std::unordered_map<std::uint32_t, NodeInfo> nodes_;
     std::unordered_map<std::uint32_t, LinkInfo> links_;
+    std::unordered_map<std::uint32_t, PortInfo> ports_;
+    std::vector<ManagedLink> managed_links_;
     std::unordered_map<std::string, std::size_t> channel_by_identity_;
     std::unordered_map<std::uint32_t, std::size_t> stream_by_node_;
     std::array<AppChannel, max_app_channels> app_channels_{};

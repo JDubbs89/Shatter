@@ -2,8 +2,10 @@
 
 #include <pipewire/keys.h>
 #include <pipewire/loop.h>
+#include <pipewire/port.h>
 #include <pipewire/stream.h>
 
+#include <algorithm>
 #include <charconv>
 #include <cstdio>
 #include <cstdlib>
@@ -18,7 +20,6 @@ namespace shatter::engine {
 
 namespace {
 constexpr char kSpeakerStreamName[] = "shatter.speakers";
-constexpr char kTargetObjectKey[] = "target.object";
 constexpr std::uint32_t kMixerClosed = 1U << 31U;
 constexpr std::uint32_t kMixerUserMask = kMixerClosed - 1U;
 
@@ -39,7 +40,7 @@ void PipeWireEngine::refresh_output_link_locked()
 {
     for (auto& output : output_channels_) {
         output.linked.store(false, std::memory_order_relaxed);
-        output.sink_node_id.store(PW_ID_ANY, std::memory_order_relaxed);
+        output.sink_count = 0;
     }
     for (const auto& [link_id, link] : links_) {
         (void)link_id;
@@ -48,9 +49,9 @@ void PipeWireEngine::refresh_output_link_locked()
             target->second.name.starts_with("shatter.stream.")) continue;
         for (auto& output : output_channels_) {
             if (output.in_use && output.node_id == link.output_node) {
-                output.sink_node_id.store(link.input_node, std::memory_order_relaxed);
+                if (output.sink_count < output.sink_node_ids.size())
+                    output.sink_node_ids[output.sink_count++] = link.input_node;
                 output.linked.store(true, std::memory_order_release);
-                break;
             }
         }
     }
@@ -100,6 +101,18 @@ bool PipeWireEngine::assign_app_output(std::string_view app_selector, std::strin
     return invoke_output_request(request, error);
 }
 
+bool PipeWireEngine::assign_input_output(std::string_view scope, std::string_view input_selector,
+                                         std::string_view output_selector, bool assigned, std::string& error)
+{
+    OutputRequest request{};
+    request.engine = this;
+    request.action = OutputRequest::Action::assign_input;
+    request.first = std::string(scope) + "\n" + std::string(input_selector);
+    request.second = std::string(output_selector);
+    request.assigned = assigned;
+    return invoke_output_request(request, error);
+}
+
 bool PipeWireEngine::invoke_output_request(OutputRequest& request, std::string& error)
 {
     if (main_loop_ == nullptr) { error = "PipeWire engine is not running"; return false; }
@@ -120,6 +133,7 @@ bool PipeWireEngine::invoke_output_request(OutputRequest& request, std::string& 
         case OutputRequest::Action::remove: error = "PipeWire could not delete the output channel"; break;
         case OutputRequest::Action::assign_sink: error = "PipeWire could not update the output sink route"; break;
         case OutputRequest::Action::assign_app: error = "PipeWire could not update the app channel's output sends"; break;
+        case OutputRequest::Action::assign_input: error = "could not update input channel output sends"; break;
         }
     }
     trace_output("operation.invoke-return", &request,
@@ -152,6 +166,35 @@ int PipeWireEngine::on_output_request(spa_loop*, bool, std::uint32_t, const void
         std::lock_guard lock(engine.nodes_mutex_);
         request.succeeded = engine.assign_app_output_locked(request.first, request.second,
                                                              request.assigned, request.error);
+        break;
+    }
+    case OutputRequest::Action::assign_input: {
+        const auto separator = request.first.find('\n');
+        const auto scope = std::string_view(request.first).substr(0, separator);
+        const auto selector = separator == std::string::npos ? std::string_view{} :
+            std::string_view(request.first).substr(separator + 1);
+        std::lock_guard lock(engine.nodes_mutex_);
+        OutputChannel* output = engine.resolve_output_locked(request.second, request.error);
+        if (output != nullptr) {
+            const auto index = static_cast<std::size_t>(output - engine.output_channels_.data());
+            const std::uint32_t bit = 1U << index;
+            std::atomic<std::uint32_t>* mask = nullptr;
+            if (scope == "stream") {
+                auto* stream = engine.resolve_stream_locked(selector, request.error);
+                if (stream != nullptr) mask = &stream->output_mask;
+            } else if (scope == "capture") {
+                if (selector != "capture") request.error = "capture input selector must be 'capture'";
+                else if (request.assigned && !engine.capture_channel_.active.load(std::memory_order_acquire))
+                    request.error = "select an active capture source before assigning its send";
+                else mask = &engine.capture_channel_.output_mask;
+            } else request.error = "input send scope must be stream or capture";
+            if (mask != nullptr) {
+                auto value = mask->load(std::memory_order_relaxed);
+                value = request.assigned ? (value | bit) : (value & ~bit);
+                mask->store(value, std::memory_order_release);
+                request.succeeded = true;
+            }
+        }
         break;
     }
     }
@@ -191,6 +234,8 @@ bool PipeWireEngine::make_output_locked(std::string name, std::string& error)
         output.engine = this;
         output.in_use = true;
         output.input_users.store(0, std::memory_order_release);
+        output.assigned_sink_count = 0;
+        for (auto& assigned_name : output.assigned_sink_names) assigned_name.clear();
         output.name = std::move(name);
         output.node_name = "shatter.output." + std::to_string(index);
         lock.unlock();
@@ -229,6 +274,7 @@ bool PipeWireEngine::delete_output_locked(std::string_view selector, std::string
     trace_output("delete.after-destroy", output, output->node_name);
     for (auto& stream : playback_streams_) {
         stream.audio[index].discard_all();
+        stream.send_audio[index].discard_all();
     }
     capture_channel_.audio[index].discard_all();
     lock.lock();
@@ -236,6 +282,9 @@ bool PipeWireEngine::delete_output_locked(std::string_view selector, std::string
     output->name.clear();
     output->node_name.clear();
     output->node_id = PW_ID_ANY;
+    output->sink_count = 0;
+    output->assigned_sink_count = 0;
+    for (auto& assigned_name : output->assigned_sink_names) assigned_name.clear();
     trace_output("delete.complete", output);
     return true;
 }
@@ -245,12 +294,19 @@ PipeWireEngine::OutputChannel* PipeWireEngine::resolve_output_locked(std::string
 {
     std::uint32_t node_id = PW_ID_ANY;
     const auto [end, parse_error] = std::from_chars(selector.data(), selector.data() + selector.size(), node_id);
+    OutputChannel* match = nullptr;
     for (auto& output : output_channels_) {
         if (!output.in_use) continue;
         if (output.name == selector || output.node_name == selector ||
-            (parse_error == std::errc{} && end == selector.data() + selector.size() && output.node_id == node_id))
-            return &output;
+            (parse_error == std::errc{} && end == selector.data() + selector.size() && output.node_id == node_id)) {
+            if (match != nullptr) {
+                error = "output selector is ambiguous; use its PipeWire node ID";
+                return nullptr;
+            }
+            match = &output;
+        }
     }
+    if (match != nullptr) return match;
     error = "unknown output channel or PipeWire node: " + std::string(selector);
     return nullptr;
 }
@@ -261,7 +317,7 @@ bool PipeWireEngine::assign_output_sink_locked(std::string_view output_selector,
 {
     OutputChannel* output = resolve_output_locked(output_selector, error);
     if (output == nullptr) return false;
-    if (output->node_id == PW_ID_ANY || default_metadata_ == nullptr) {
+    if (output->node_id == PW_ID_ANY) {
         error = "output channel is not ready in PipeWire";
         return false;
     }
@@ -284,19 +340,194 @@ bool PipeWireEngine::assign_output_sink_locked(std::string_view output_selector,
         }
     }
     if (sink == nullptr) { error = "unknown PipeWire playback sink: " + std::string(sink_selector); return false; }
-    if (!assigned && output->sink_node_id.load(std::memory_order_acquire) != sink->node_id) {
-        error = "output channel is not assigned to playback sink: " + std::string(sink_selector);
+    auto route_it = std::find(output->assigned_sink_node_ids.begin(),
+                              output->assigned_sink_node_ids.begin() + output->assigned_sink_count,
+                              sink->node_id);
+    const bool route_exists = route_it != output->assigned_sink_node_ids.begin() + output->assigned_sink_count;
+    std::size_t placeholder_index = output->assigned_sink_count;
+    for (std::size_t i = 0; i < output->assigned_sink_count; ++i) {
+        if (output->assigned_sink_node_ids[i] == PW_ID_ANY &&
+            output->assigned_sink_names[i] == sink->name) placeholder_index = i;
+    }
+    if (assigned && route_exists) {
+        error = "output channel is already assigned to playback sink: " + std::string(sink_selector);
         return false;
     }
-    pw_properties* stream_properties = pw_properties_new(PW_KEY_NODE_AUTOCONNECT,
-        assigned ? "true" : "false", nullptr);
-    if (stream_properties == nullptr) { error = "could not allocate output routing properties"; return false; }
-    const int property_result = pw_stream_update_properties(output->stream, &stream_properties->dict);
-    pw_properties_free(stream_properties);
-    if (property_result < 0) { error = "could not update output auto-connect policy"; return false; }
-    const int result = pw_metadata_set_property(default_metadata_, output->node_id, kTargetObjectKey,
-        "Spa:String", assigned ? sink->name.c_str() : "-1");
-    if (result < 0) { error = "could not update the output channel's PipeWire sink assignment"; return false; }
+
+    if (!assigned) {
+        if (!route_exists) {
+            error = "output channel is not assigned to playback sink: " + std::string(sink_selector);
+            return false;
+        }
+        bool managed = false;
+        for (const auto& route : managed_links_)
+            if (route.output_node == output->node_id && route.sink_node == sink->node_id) managed = true;
+        if (!managed) {
+            std::uint32_t replacement_id = PW_ID_ANY;
+            for (std::size_t i = 0; i < output->assigned_sink_count; ++i) {
+                if (output->assigned_sink_node_ids[i] != sink->node_id) {
+                    replacement_id = output->assigned_sink_node_ids[i];
+                    break;
+                }
+            }
+            if (replacement_id == PW_ID_ANY) {
+                if (default_metadata_ != nullptr)
+                    pw_metadata_set_property(default_metadata_, output->node_id, "target.object", "Spa:String", "-1");
+            } else {
+                const auto replacement = nodes_.find(replacement_id);
+                if (replacement != nodes_.end()) {
+                    for (auto it = managed_links_.begin(); it != managed_links_.end();) {
+                        if (it->output_node == output->node_id && it->sink_node == replacement_id) {
+                            if (it->proxy != nullptr) pw_core_destroy(core_, it->proxy);
+                            it = managed_links_.erase(it);
+                        } else ++it;
+                    }
+                    pw_properties* properties = pw_properties_new(PW_KEY_NODE_AUTOCONNECT, "true", nullptr);
+                    if (properties != nullptr) {
+                        pw_stream_update_properties(output->stream, &properties->dict);
+                        pw_properties_free(properties);
+                    }
+                    if (default_metadata_ != nullptr)
+                        pw_metadata_set_property(default_metadata_, output->node_id, "target.object", "Spa:String",
+                                                 replacement->second.name.c_str());
+                }
+            }
+        }
+        for (auto it = managed_links_.begin(); it != managed_links_.end();) {
+            if (it->output_node == output->node_id && it->sink_node == sink->node_id) {
+                if (it->proxy != nullptr) pw_core_destroy(core_, it->proxy);
+                it = managed_links_.erase(it);
+            } else ++it;
+        }
+        for (std::size_t i = static_cast<std::size_t>(route_it - output->assigned_sink_node_ids.begin());
+             i + 1 < output->assigned_sink_count; ++i)
+        {
+            output->assigned_sink_node_ids[i] = output->assigned_sink_node_ids[i + 1];
+            output->assigned_sink_names[i] = std::move(output->assigned_sink_names[i + 1]);
+        }
+        --output->assigned_sink_count;
+        output->assigned_sink_node_ids[output->assigned_sink_count] = PW_ID_ANY;
+        output->assigned_sink_names[output->assigned_sink_count].clear();
+        refresh_output_link_locked();
+        return true;
+    }
+
+    if (output->assigned_sink_count == 0) {
+        pw_properties* properties = pw_properties_new(PW_KEY_NODE_AUTOCONNECT, "true", nullptr);
+        if (properties == nullptr) { error = "could not allocate output routing properties"; return false; }
+        const int property_result = pw_stream_update_properties(output->stream, &properties->dict);
+        pw_properties_free(properties);
+        if (property_result < 0 || default_metadata_ == nullptr ||
+            pw_metadata_set_property(default_metadata_, output->node_id, "target.object", "Spa:String", sink->name.c_str()) < 0) {
+            error = "could not assign output to its first playback sink";
+            return false;
+        }
+        output->assigned_sink_node_ids[0] = sink->node_id;
+        output->assigned_sink_names[0] = sink->name;
+        output->assigned_sink_count = 1;
+        return true;
+    }
+    if (placeholder_index == 0 && output->assigned_sink_node_ids[0] == PW_ID_ANY &&
+        std::none_of(managed_links_.begin(), managed_links_.end(), [output](const ManagedLink& link) {
+            return link.output_node == output->node_id;
+        })) {
+        if (default_metadata_ == nullptr || pw_metadata_set_property(default_metadata_, output->node_id,
+                "target.object", "Spa:String", sink->name.c_str()) < 0) {
+            error = "could not restore the output's primary playback sink";
+            return false;
+        }
+        output->assigned_sink_node_ids[0] = sink->node_id;
+        return true;
+    }
+    if (placeholder_index >= output->assigned_sink_count &&
+        output->assigned_sink_count >= output->assigned_sink_node_ids.size()) {
+        error = "output channel reached its playback sink limit";
+        return false;
+    }
+    const std::vector<std::uint32_t> route_sink_ids{sink->node_id};
+
+    std::vector<PortInfo> output_ports;
+    std::unordered_map<std::uint32_t, std::vector<PortInfo>> sink_ports_by_node;
+    for (const auto& [global_id, port] : ports_) {
+        (void)global_id;
+        if (port.node_id == output->node_id && !port.input) output_ports.push_back(port);
+        if (port.input) sink_ports_by_node[port.node_id].push_back(port);
+    }
+    // PipeWire does not expose ports for every stream node to every client. Shatter's
+    // output format is fixed stereo, and stream output port IDs are zero-based.
+    auto& sink_ports = sink_ports_by_node[sink->node_id];
+    if (output_ports.empty() && sink_ports.size() == 2) {
+        output_ports.push_back({output->node_id, 0, "output_FL", false});
+        output_ports.push_back({output->node_id, 1, "output_FR", false});
+    }
+    const auto order_ports = [](const PortInfo& left, const PortInfo& right) {
+        return left.port_id < right.port_id;
+    };
+    std::sort(output_ports.begin(), output_ports.end(), order_ports);
+    for (std::size_t i = 0; i < output_ports.size(); ++i)
+        if (output_ports[i].name.empty()) output_ports[i].name = i == 0 ? "output_FL" : "output_FR";
+    for (auto& [id, ports] : sink_ports_by_node) {
+        (void)id;
+        std::sort(ports.begin(), ports.end(), order_ports);
+        for (std::size_t i = 0; i < ports.size(); ++i)
+            if (ports[i].name.empty()) ports[i].name = i == 0 ? "playback_FL" : "playback_FR";
+    }
+    if (output_ports.empty() || output_ports.size() != sink_ports.size()) {
+        error = "PipeWire output and sink ports are not ready or have incompatible channel counts (output=" +
+            std::to_string(output_ports.size()) + ", sink=" + std::to_string(sink_ports.size()) + ")";
+        return false;
+    }
+
+    std::vector<pw_proxy*> created_links;
+    std::vector<std::uint32_t> created_link_sinks;
+    for (const std::uint32_t sink_node_id : route_sink_ids) {
+      auto ports = sink_ports_by_node[sink_node_id];
+      if (ports.empty() && sink_ports.size() == 2) {
+          ports.push_back({sink_node_id, 0, "playback_FL", true});
+          ports.push_back({sink_node_id, 1, "playback_FR", true});
+      }
+      if (ports.size() != output_ports.size()) {
+          error = "PipeWire sink ports are not ready or have incompatible channel counts";
+          break;
+      }
+      for (std::size_t index = 0; index < output_ports.size(); ++index) {
+        pw_properties* properties = pw_properties_new(
+            PW_KEY_LINK_OUTPUT_NODE, std::to_string(output->node_id).c_str(),
+            PW_KEY_LINK_OUTPUT_PORT, output_ports[index].name.c_str(),
+            PW_KEY_LINK_INPUT_NODE, std::to_string(sink_node_id).c_str(),
+            PW_KEY_LINK_INPUT_PORT, ports[index].name.c_str(),
+            nullptr);
+        if (properties == nullptr) {
+            error = "could not allocate PipeWire link properties";
+            break;
+        }
+        auto* proxy = static_cast<pw_proxy*>(pw_core_create_object(core_, "link-factory",
+            PW_TYPE_INTERFACE_Link, PW_VERSION_LINK, &properties->dict, 0));
+        pw_properties_free(properties);
+        if (proxy == nullptr) {
+            error = "PipeWire could not create an output sink link";
+            break;
+        }
+        created_links.push_back(proxy);
+        created_link_sinks.push_back(sink_node_id);
+      }
+      if (!error.empty()) break;
+    }
+    if (created_links.size() != output_ports.size() * route_sink_ids.size()) {
+        for (pw_proxy* proxy : created_links) pw_core_destroy(core_, proxy);
+        if (error.empty()) error = "PipeWire could not create the complete output sink route";
+        return false;
+    }
+
+    for (std::size_t i = 0; i < created_links.size(); ++i)
+        managed_links_.push_back({output->node_id, created_link_sinks[i], created_links[i]});
+    if (placeholder_index < output->assigned_sink_count) {
+        output->assigned_sink_node_ids[placeholder_index] = sink->node_id;
+    } else {
+        output->assigned_sink_node_ids[output->assigned_sink_count] = sink->node_id;
+        output->assigned_sink_names[output->assigned_sink_count] = sink->name;
+        ++output->assigned_sink_count;
+    }
     return true;
 }
 

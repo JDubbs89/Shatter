@@ -43,6 +43,8 @@ constexpr std::string_view kUsage =
     "       shatter unassign out <output-name-or-id> <sink-name-or-id>\n"
     "       shatter assign app <app-name-or-id> <output-name-or-id>\n"
     "       shatter unassign app <app-name-or-id> <output-name-or-id>\n"
+    "       shatter assign <capture|stream> <input-name-or-id> <output-name-or-id>\n"
+    "       shatter unassign <capture|stream> <input-name-or-id> <output-name-or-id>\n"
     "       shatter save show <name>\n"
     "       shatter load show <name>\n"
     "       shatter help\n";
@@ -184,6 +186,12 @@ int run_cli(int argc, char** argv)
         normalized.emplace_back(arg(1) == "assign" ? "--assign-app-output" : "--unassign-app-output");
         normalized.emplace_back(argv[3]);
         normalized.emplace_back(argv[4]);
+    } else if ((arg(1) == "assign" || arg(1) == "unassign") && argc == 5 &&
+               (arg(2) == "capture" || arg(2) == "stream")) {
+        normalized.emplace_back(arg(1) == "assign" ? "--assign-input-output" : "--unassign-input-output");
+        normalized.emplace_back(argv[2]);
+        normalized.emplace_back(argv[3]);
+        normalized.emplace_back(argv[4]);
     } else if ((arg(1) == "save" || arg(1) == "load") && argc == 4 && arg(2) == "show") {
         normalized.emplace_back(arg(1) == "save" ? "--config-save" : "--config-load");
         normalized.emplace_back(argv[3]);
@@ -218,6 +226,18 @@ int run_cli(int argc, char** argv)
             if (output_sink) command << (assigned ? "OUTPUT-SINK-ASSIGN " : "OUTPUT-SINK-UNASSIGN ");
             else command << (assigned ? "APP-OUTPUT-ASSIGN " : "APP-OUTPUT-UNASSIGN ");
             command << std::quoted(argv[2]) << ' ' << std::quoted(argv[3]);
+            const std::string response = shatter::api::request(command.str());
+            if (response.empty()) { std::cerr << "Shatter engine is unavailable; run `shatter start` first.\n"; return 1; }
+            if (response.starts_with("ERR ")) { std::cerr << response; return 1; }
+            std::cout << response;
+            return 0;
+        }
+        if (argc == 5 && (std::string_view(argv[1]) == "--assign-input-output" ||
+                          std::string_view(argv[1]) == "--unassign-input-output")) {
+            const bool assigned = std::string_view(argv[1]) == "--assign-input-output";
+            std::ostringstream command;
+            command << (assigned ? "INPUT-OUTPUT-ASSIGN " : "INPUT-OUTPUT-UNASSIGN ")
+                    << std::quoted(argv[2]) << ' ' << std::quoted(argv[3]) << ' ' << std::quoted(argv[4]);
             const std::string response = shatter::api::request(command.str());
             if (response.empty()) { std::cerr << "Shatter engine is unavailable; run `shatter start` first.\n"; return 1; }
             if (response.starts_with("ERR ")) { std::cerr << response; return 1; }

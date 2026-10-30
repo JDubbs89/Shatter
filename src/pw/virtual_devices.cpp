@@ -163,7 +163,7 @@ void PipeWireEngine::destroy_output_stream(OutputChannel& output)
 {
     output.active.store(false, std::memory_order_release);
     output.linked.store(false, std::memory_order_release);
-    output.sink_node_id.store(PW_ID_ANY, std::memory_order_release);
+    output.sink_count = 0;
     output.mixer_users.fetch_or(kMixerClosed, std::memory_order_acq_rel);
     output.input_users.fetch_or(kMixerClosed, std::memory_order_acq_rel);
     if (output.stream != nullptr) {

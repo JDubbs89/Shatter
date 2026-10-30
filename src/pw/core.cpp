@@ -1,6 +1,7 @@
 #include "shatter/engine/pipewire_engine.hpp"
 
 #include <pipewire/keys.h>
+#include <pipewire/port.h>
 
 #include <algorithm>
 #include <charconv>
@@ -63,6 +64,36 @@ void PipeWireEngine::on_global(void* data, std::uint32_t id, std::uint32_t,
         return;
     }
 
+    if (std::strcmp(type, PW_TYPE_INTERFACE_Port) == 0) {
+        const char* node_text = spa_dict_lookup(props, PW_KEY_NODE_ID);
+        const char* port_text = spa_dict_lookup(props, PW_KEY_PORT_ID);
+        const char* direction = spa_dict_lookup(props, PW_KEY_PORT_DIRECTION);
+        if (node_text == nullptr || port_text == nullptr || direction == nullptr) return;
+        PortInfo port;
+        const auto node_parse = std::from_chars(node_text, node_text + std::strlen(node_text), port.node_id);
+        const auto port_parse = std::from_chars(port_text, port_text + std::strlen(port_text), port.port_id);
+        if (node_parse.ec != std::errc{} || port_parse.ec != std::errc{}) return;
+        port.input = std::strcmp(direction, "in") == 0;
+        if (const char* name = spa_dict_lookup(props, PW_KEY_PORT_NAME)) port.name = name;
+        std::lock_guard lock(engine.nodes_mutex_);
+        engine.ports_[id] = port;
+        const auto sink = engine.nodes_.find(port.node_id);
+        if (sink != engine.nodes_.end() && sink->second.media_class == "Audio/Sink") {
+            for (auto& output : engine.output_channels_) {
+                if (!output.in_use) continue;
+                bool pending = false;
+                for (std::size_t i = 0; i < output.assigned_sink_count; ++i)
+                    if (output.assigned_sink_node_ids[i] == PW_ID_ANY &&
+                        output.assigned_sink_names[i] == sink->second.name) pending = true;
+                if (pending) {
+                    std::string route_error;
+                    engine.assign_output_sink_locked(output.name, sink->second.name, true, route_error);
+                }
+            }
+        }
+        return;
+    }
+
     if (std::strcmp(type, PW_TYPE_INTERFACE_Node) != 0) {
         return;
     }
@@ -105,6 +136,14 @@ void PipeWireEngine::on_global_remove(void* data, std::uint32_t id)
     bool removed_capture_source = false;
     {
         std::lock_guard lock(engine.nodes_mutex_);
+        const auto removed_node = engine.nodes_.find(id);
+        if (removed_node != engine.nodes_.end() && removed_node->second.media_class == "Audio/Sink") {
+            for (auto& output : engine.output_channels_) {
+                if (!output.in_use) continue;
+                for (std::size_t i = 0; i < output.assigned_sink_count; ++i)
+                    if (output.assigned_sink_node_ids[i] == id) output.assigned_sink_node_ids[i] = PW_ID_ANY;
+            }
+        }
         removed_capture_source = engine.capture_channel_.source_node_id == id;
         const auto stream = engine.stream_by_node_.find(id);
         if (stream != engine.stream_by_node_.end()) {
@@ -115,6 +154,14 @@ void PipeWireEngine::on_global_remove(void* data, std::uint32_t id)
         }
         engine.nodes_.erase(id);
         engine.links_.erase(id);
+        engine.ports_.erase(id);
+        for (auto it = engine.managed_links_.begin(); it != engine.managed_links_.end();) {
+            if (it->output_node == id || it->sink_node == id) {
+                if (it->proxy != nullptr) pw_proxy_destroy(it->proxy);
+                it = engine.managed_links_.erase(it);
+            }
+            else ++it;
+        }
         engine.refresh_output_link_locked();
     }
     if (removed_capture_source) {

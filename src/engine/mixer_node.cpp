@@ -55,7 +55,9 @@ void PipeWireEngine::stream_input_process(PlaybackStream& stream)
             const float increment = frames == 0 ? 0.0F
                 : (target - stream.smoothed_gain) / static_cast<float>(frames);
             std::size_t written = frames;
-            const auto mask = app_channels_[stream.channel_index].output_mask.load(std::memory_order_acquire);
+            const auto app_mask = app_channels_[stream.channel_index].output_mask.load(std::memory_order_acquire);
+            const auto stream_mask = stream.output_mask.load(std::memory_order_acquire);
+            const auto mask = app_mask | stream_mask;
             for (std::size_t output_index = 0; output_index < output_channels_.size(); ++output_index) {
                 if ((mask & (1U << output_index)) == 0) continue;
                 OutputChannel& output = output_channels_[output_index];
@@ -70,8 +72,14 @@ void PipeWireEngine::stream_input_process(PlaybackStream& stream)
                 }
                 if (!output_acquired) continue;
                 if (output.linked.load(std::memory_order_acquire)) {
-                    written = std::min(written, stream.audio[output_index].write_with_gain_ramp(
-                        samples, frames, stream.smoothed_gain, increment));
+                    if ((app_mask & (1U << output_index)) != 0) {
+                        written = std::min(written, stream.audio[output_index].write_with_gain_ramp(
+                            samples, frames, stream.smoothed_gain, increment));
+                    }
+                    if ((stream_mask & (1U << output_index)) != 0) {
+                        written = std::min(written, stream.send_audio[output_index].write_with_gain_ramp(
+                            samples, frames, stream.smoothed_gain, increment));
+                    }
                 }
                 output.input_users.fetch_sub(1, std::memory_order_release);
             }
@@ -212,6 +220,28 @@ void PipeWireEngine::output_process(OutputChannel& output)
                         gain += increment;
                     }
                     channel.smoothed_gain[output_index] = target;
+                }
+
+                for (std::size_t stream_index = 0; stream_index < stream_count; ++stream_index) {
+                    PlaybackStream& stream = playback_streams_[stream_index];
+                    if (!stream.active.load(std::memory_order_acquire) ||
+                        (stream.output_mask.load(std::memory_order_acquire) & output_bit) == 0) continue;
+                    std::uint32_t stream_users = stream.mixer_users.load(std::memory_order_acquire);
+                    bool stream_acquired = false;
+                    while ((stream_users & kMixerClosed) == 0) {
+                        if (stream.mixer_users.compare_exchange_weak(stream_users, stream_users + 1,
+                                std::memory_order_acquire, std::memory_order_relaxed)) {
+                            stream_acquired = true;
+                            break;
+                        }
+                    }
+                    if (!stream_acquired) continue;
+                    auto& ring = stream.send_audio[output_index];
+                    const auto consumed = ring.read(channel_mix.data(), block_frames);
+                    for (std::size_t sample = 0; sample < block_frames * kChannels; ++sample)
+                        samples[output_offset + sample] += channel_mix[sample];
+                    profile_scope.record_unfilled_mix_frames(block_frames - consumed);
+                    stream.mixer_users.fetch_sub(1, std::memory_order_release);
                 }
 
                 std::fill(channel_mix.begin(), channel_mix.begin() + block_frames * kChannels, 0.0F);

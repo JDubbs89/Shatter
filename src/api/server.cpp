@@ -296,6 +296,15 @@ int run_server()
                 else if (audio_engine.assign_app_output(app, output, action == "APP-OUTPUT-ASSIGN", output_error))
                     reply = std::string("OK app channel output ") + (action == "APP-OUTPUT-ASSIGN" ? "assigned\n" : "unassigned\n");
                 else reply = "ERR " + output_error + "\n";
+            } else if (input.starts_with("INPUT-OUTPUT-")) {
+                std::istringstream parsed{std::string(input)};
+                std::string action, scope, selector, output, extra, output_error;
+                if (!(parsed >> action >> std::quoted(scope) >> std::quoted(selector) >> std::quoted(output)) || (parsed >> extra))
+                    reply = "ERR expected INPUT-OUTPUT <scope> <input> <output>\n";
+                else if (audio_engine.assign_input_output(scope, selector, output,
+                             action == "INPUT-OUTPUT-ASSIGN", output_error))
+                    reply = "OK input channel output send updated\n";
+                else reply = "ERR " + output_error + "\n";
             } else if (input.starts_with("CAPTURE-SOURCE ")) {
                 std::string value(input.substr(std::string_view("CAPTURE-SOURCE ").size()));
                 std::uint32_t source_id = PW_ID_ANY;

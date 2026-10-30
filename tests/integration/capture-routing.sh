@@ -93,7 +93,7 @@ esac
 sleep 0.3
 inputs=$($binary --list-in)
 case "$inputs" in
-    *"speaker send off"*) ;;
+    *"speaker send off"*|*"sends off"*) ;;
     *) echo "capture speaker send should default off: $inputs" >&2; exit 1 ;;
 esac
 if ! "$binary" --set-capture-send off >/dev/null; then
