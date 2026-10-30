@@ -51,3 +51,21 @@ add_executable(audio_ring_test tests/unit/audio-ring.cpp)
 target_include_directories(audio_ring_test PRIVATE include)
 target_compile_features(audio_ring_test PRIVATE cxx_std_20)
 add_test(NAME audio_ring COMMAND audio_ring_test)
+
+find_program(PIPEWIRE_TEST_EXECUTABLE pipewire)
+find_program(WIREPLUMBER_TEST_EXECUTABLE wireplumber)
+find_program(PW_CLI_TEST_EXECUTABLE pw-cli)
+find_program(WPCTL_TEST_EXECUTABLE wpctl)
+find_program(PW_PLAY_TEST_EXECUTABLE pw-play)
+find_program(PW_RECORD_TEST_EXECUTABLE pw-record)
+find_program(PW_LINK_TEST_EXECUTABLE pw-link)
+find_program(PYTHON3_TEST_EXECUTABLE python3)
+if(PIPEWIRE_TEST_EXECUTABLE AND WIREPLUMBER_TEST_EXECUTABLE AND PW_CLI_TEST_EXECUTABLE
+   AND WPCTL_TEST_EXECUTABLE AND PW_PLAY_TEST_EXECUTABLE AND PW_RECORD_TEST_EXECUTABLE
+   AND PW_LINK_TEST_EXECUTABLE AND PYTHON3_TEST_EXECUTABLE)
+    add_test(
+        NAME app_playback_routing
+        COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/app-playback-routing.sh" "$<TARGET_FILE:shatter>"
+    )
+    set_tests_properties(app_playback_routing PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+endif()

@@ -9,8 +9,12 @@ A mixer source that contributes audio to one or more mixes. It can represent app
 _Avoid_: Strip (unless quoting a specific external mixer’s terminology)
 
 **Playback channel**:
-An input channel receiving audio from one or more matching application playback streams. Those streams share the channel’s gain, mute, metering, and sends.
+An input channel for one application, receiving the application's matching playback streams. Each playback stream can be adjusted before the streams are combined; the combined channel has its own gain, mute, metering, and sends.
 _Avoid_: App output (ambiguous with PipeWire graph output)
+
+**Playback stream**:
+An individual audio stream an application publishes to PipeWire; one application may have several playback streams.
+_Avoid_: Playback channel (a stream is one feed into the application channel)
 
 **Capture channel**:
 An input channel receiving audio from a physical capture device, such as a microphone.

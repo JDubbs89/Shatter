@@ -1,0 +1,261 @@
+#!/bin/sh
+set -eu
+
+binary=$1
+test_root=$(mktemp -d /tmp/shatter-pw-integration.XXXXXX)
+runtime_dir="$test_root/runtime"
+config_dir="$test_root/config"
+home_dir="$test_root/home"
+pipewire_pid=
+wireplumber_pid=
+engine_running=0
+playback_pids=
+
+cleanup()
+{
+    if [ "$engine_running" -eq 1 ]; then
+        XDG_RUNTIME_DIR="$runtime_dir" "$binary" stop >/dev/null 2>&1 || true
+    fi
+    for pid in $playback_pids; do
+        kill "$pid" 2>/dev/null || true
+    done
+    if [ -n "$wireplumber_pid" ]; then kill "$wireplumber_pid" 2>/dev/null || true; fi
+    if [ -n "$pipewire_pid" ]; then kill "$pipewire_pid" 2>/dev/null || true; fi
+    if [ -n "$wireplumber_pid" ]; then wait "$wireplumber_pid" 2>/dev/null || true; fi
+    if [ -n "$pipewire_pid" ]; then wait "$pipewire_pid" 2>/dev/null || true; fi
+    python3 - "$test_root" <<'PY'
+import shutil
+import sys
+shutil.rmtree(sys.argv[1], ignore_errors=True)
+PY
+}
+trap cleanup EXIT HUP INT TERM
+
+mkdir -p "$runtime_dir" "$config_dir/pipewire.conf.d" "$home_dir/.config" "$home_dir/.local/state" "$home_dir/.cache"
+chmod 700 "$runtime_dir"
+cp /usr/share/pipewire/pipewire.conf "$config_dir/pipewire.conf"
+cp /usr/share/pipewire/client.conf "$config_dir/client.conf"
+export HOME="$home_dir"
+export XDG_RUNTIME_DIR="$runtime_dir"
+export XDG_CONFIG_HOME="$home_dir/.config"
+export XDG_STATE_HOME="$home_dir/.local/state"
+export XDG_CACHE_HOME="$home_dir/.cache"
+export PIPEWIRE_CONFIG_DIR="$config_dir"
+
+pipewire --config=pipewire.conf >"$test_root/pipewire.log" 2>&1 &
+pipewire_pid=$!
+ready=0
+for attempt in $(seq 1 50); do
+    if pw-cli info 0 >/dev/null 2>&1; then ready=1; break; fi
+    sleep 0.1
+done
+if [ "$ready" -ne 1 ]; then
+    cat "$test_root/pipewire.log" >&2
+    echo "isolated PipeWire did not start" >&2
+    exit 1
+fi
+
+wireplumber --profile policy >"$test_root/wireplumber.log" 2>&1 &
+wireplumber_pid=$!
+sleep 0.5
+pw-cli create-node adapter '{ factory.name = support.null-audio-sink node.name = shatter-test-speakers node.description = "Shatter Test Speakers" media.class = Audio/Sink audio.position = [ FL FR ] object.linger = true }' >/dev/null
+sleep 0.3
+sink_id=$(wpctl status -n | awk '/shatter-test-speakers/ { for (i=1; i<=NF; ++i) if ($i ~ /^[0-9]+\.$/) { id=$i; sub(/\.$/, "", id); print id; exit } }')
+if [ -z "$sink_id" ]; then
+    cat "$test_root/wireplumber.log" >&2
+    echo "isolated test sink was not created" >&2
+    exit 1
+fi
+wpctl set-default "$sink_id" >/dev/null
+
+python3 - "$test_root/sine.wav" "$test_root/sine-other.wav" <<'PY'
+import math
+import struct
+import sys
+import wave
+
+rate = 48000
+for path, frequency in ((sys.argv[1], 440), (sys.argv[2], 880)):
+    with wave.open(path, "wb") as output:
+        output.setnchannels(2)
+        output.setsampwidth(2)
+        output.setframerate(rate)
+        for frame in range(rate * 20):
+            sample = int(8000 * math.sin(2 * math.pi * frequency * frame / rate))
+            output.writeframesraw(struct.pack("<hh", sample, sample))
+PY
+
+pw-play --target default -P 'application.name=TestAppA application.id=org.shatter.test.appa' "$test_root/sine.wav" >/dev/null 2>&1 &
+initial_playback_pid=$!
+playback_pids="$playback_pids $initial_playback_pid"
+sleep 0.3
+"$binary" start
+engine_running=1
+
+wait_for_apps()
+{
+    expected=$1
+    for attempt in $(seq 1 80); do
+        inputs=$("$binary" --list-in)
+        count=$(printf '%s\n' "$inputs" | grep -Ec '\([0-9]+\)$' || true)
+        if [ "$count" -ge "$expected" ]; then
+            printf '%s\n' "$inputs"
+            return 0
+        fi
+        sleep 0.1
+    done
+    echo "$inputs" >&2
+    echo "PipeWire playback streams were not assigned to app channels" >&2
+    return 1
+}
+
+inputs=$(wait_for_apps 1)
+app_a_id=$(printf '%s\n' "$inputs" | awk '$1 ~ /^app-/ && $2 == "TestAppA" { print $1; exit }')
+if [ -z "$app_a_id" ]; then
+    echo "$inputs" >&2
+    echo "app channel ID was not listed" >&2
+    exit 1
+fi
+
+record_monitor()
+{
+    destination=$1
+    pw-record --target 0 --rate 48000 --channels 2 --format f32 --raw --sample-count 48000 "$destination" \
+        >"$test_root/record.log" 2>&1 &
+    record_pid=$!
+    ready=0
+    for attempt in $(seq 1 40); do
+        if pw-link -i | grep -q 'pw-record:input_FL'; then ready=1; break; fi
+        sleep 0.05
+    done
+    if [ "$ready" -ne 1 ]; then
+        kill "$record_pid" 2>/dev/null || true
+        echo "PipeWire recorder ports did not appear" >&2
+        return 1
+    fi
+    pw-link shatter-test-speakers:monitor_FL pw-record:input_FL >/dev/null
+    pw-link shatter-test-speakers:monitor_FR pw-record:input_FR >/dev/null
+    wait "$record_pid" || [ -s "$destination" ]
+}
+
+record_monitor "$test_root/baseline.raw"
+"$binary" --set-gain app "$app_a_id" -20
+sleep 0.25
+record_monitor "$test_root/app-quiet.raw"
+"$binary" --set-gain app "$app_a_id" 0
+
+stream_a_id=$(printf '%s\n' "$inputs" | awk -v channel="$app_a_id" '
+    $1 ~ /^app-/ { selected = ($1 == channel) }
+    selected && /\([0-9]+\)$/ { row=$0; sub(/^.*\(/, "", row); sub(/\).*$/, "", row); print row; exit }
+')
+if [ -z "$stream_a_id" ]; then
+    echo "$inputs" >&2
+    echo "app playback stream ID was not listed" >&2
+    exit 1
+fi
+"$binary" --set-gain stream "$stream_a_id" -20
+"$binary" --set-mute stream "$stream_a_id" on
+"$binary" --set-mute stream "$stream_a_id" off
+"$binary" --set-mute app "$app_a_id" on
+"$binary" --set-mute app "$app_a_id" off
+
+kill "$initial_playback_pid"
+wait "$initial_playback_pid" 2>/dev/null || true
+removed=0
+for attempt in $(seq 1 50); do
+    inputs=$("$binary" --list-in)
+    if ! printf '%s\n' "$inputs" | grep -q "($stream_a_id)"; then removed=1; break; fi
+    sleep 0.1
+done
+if [ "$removed" -ne 1 ]; then
+    echo "$inputs" >&2
+    echo "removed playback stream remained assigned to its channel" >&2
+    exit 1
+fi
+
+pw-play --target default -P 'application.name=TestAppA application.id=org.shatter.test.appa' "$test_root/sine.wav" >/dev/null 2>&1 &
+playback_pids="$playback_pids $!"
+pw-play --target default -P 'application.name=TestAppA application.id=org.shatter.test.appa' "$test_root/sine-other.wav" >/dev/null 2>&1 &
+playback_pids="$playback_pids $!"
+pw-play --target default -P 'application.name=TestAppB application.id=org.shatter.test.appb' "$test_root/sine.wav" >/dev/null 2>&1 &
+playback_pids="$playback_pids $!"
+inputs=$(wait_for_apps 3)
+app_b_id=$(printf '%s\n' "$inputs" | awk '$1 ~ /^app-/ && $2 == "TestAppB" { print $1; exit }')
+if [ -z "$app_b_id" ] || [ "$app_a_id" = "$app_b_id" ]; then
+    echo "$inputs" >&2
+    echo "separate applications did not receive separate channels" >&2
+    exit 1
+fi
+stream_a_ids=$(printf '%s\n' "$inputs" | awk -v channel="$app_a_id" '
+    $1 ~ /^app-/ { selected = ($1 == channel) }
+    selected && /\([0-9]+\)$/ { row=$0; sub(/^.*\(/, "", row); sub(/\).*$/, "", row); print row }
+')
+set -- $stream_a_ids
+if [ "$#" -ne 2 ]; then
+    echo "$inputs" >&2
+    echo "expected two playback streams assigned to TestAppA" >&2
+    exit 1
+fi
+stream_a_first=$1
+stream_a_second=$2
+"$binary" --set-mute app "$app_b_id" on
+"$binary" --set-gain stream "$stream_a_first" 0
+"$binary" --set-gain stream "$stream_a_second" 0
+sleep 0.25
+record_monitor "$test_root/paired-baseline.raw"
+"$binary" --set-gain stream "$stream_a_second" -20
+sleep 0.25
+record_monitor "$test_root/paired-attenuated.raw"
+"$binary" --set-gain stream "$stream_a_second" 0
+sleep 0.25
+"$binary" --set-mute stream "$stream_a_second" on
+sleep 0.25
+record_monitor "$test_root/one-stream-muted.raw"
+"$binary" --set-mute stream "$stream_a_second" off
+"$binary" --set-mute app "$app_b_id" off
+
+link_count=$(pw-link -l | grep -c 'shatter.stream.' || true)
+if [ "$link_count" -lt 6 ]; then
+    pw-link -l >&2
+    echo "expected all three stereo app streams to link to their Shatter ingress endpoints" >&2
+    exit 1
+fi
+
+"$binary" stop
+engine_running=0
+restored=0
+for attempt in $(seq 1 50); do
+    link_count=$(pw-link -l | grep -c 'shatter-test-speakers:playback_' || true)
+    if [ "$link_count" -ge 6 ]; then restored=1; break; fi
+    sleep 0.1
+done
+if [ "$restored" -ne 1 ]; then
+    pw-link -l >&2
+    echo "application streams did not return to the ordinary PipeWire sink after Shatter stopped" >&2
+    exit 1
+fi
+
+python3 - "$test_root/baseline.raw" "$test_root/app-quiet.raw" "$test_root/paired-baseline.raw" "$test_root/paired-attenuated.raw" "$test_root/one-stream-muted.raw" <<'PY'
+import math
+import struct
+import sys
+
+def rms(path):
+    data = open(path, "rb").read()
+    samples = struct.unpack("<%df" % (len(data) // 4), data)
+    return math.sqrt(sum(sample * sample for sample in samples) / len(samples)) if samples else 0.0
+
+baseline = rms(sys.argv[1])
+quiet = rms(sys.argv[2])
+paired = rms(sys.argv[3])
+attenuated = rms(sys.argv[4])
+one_muted = rms(sys.argv[5])
+if baseline < 0.01 or quiet > baseline * 0.2:
+    raise SystemExit("app channel gain did not produce the expected output change: baseline=%s quiet=%s" % (baseline, quiet))
+if paired < 0.01 or not paired * 0.65 < attenuated < paired * 0.78:
+    raise SystemExit("stream gain did not affect only its stream: paired=%s attenuated=%s" % (paired, attenuated))
+if not paired * 0.65 < one_muted < paired * 0.78:
+    raise SystemExit("stream mute did not mute only its stream: paired=%s one-muted=%s" % (paired, one_muted))
+PY
+
+echo "isolated app playback routing, grouping, controls, and fallback passed"

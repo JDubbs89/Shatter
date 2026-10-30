@@ -4,7 +4,7 @@ A single-user Linux desktop mixer daemon for persistent application and device r
 
 ## Project status
 
-This repository currently contains the design spec and an architecture scaffold. The module translation units are placeholders; the audio engine, PipeWire integration, local API, and state handling are not implemented yet.
+This repository is an early prototype. The engine groups PipeWire playback streams into per-application channels, provides per-stream and per-channel gain and mute controls, and routes the mix to the PipeWire default playback sink. Capture routing and mix buses are not implemented yet.
 
 ## Architecture and domain
 
@@ -32,7 +32,7 @@ Run the repository install script to build and install `shatter` into `~/.local/
 sh install.sh
 ```
 
-The initial command manages the background engine process; audio routing and processing are not implemented yet.
+The background engine discovers application playback streams and assigns each stream to a per-application channel. Use `--list-in` to find app channel IDs and PipeWire stream node IDs, then adjust the whole app or an individual stream with `--set-gain` and `--set-mute`.
 
 ```sh
 shatter start
@@ -41,7 +41,9 @@ shatter stop
 shatter --list-in
 shatter --list-out
 shatter --list-all
-shatter --set-gain app-playback -6
+shatter --set-gain app app-id -6
+shatter --set-gain stream 42 -6
+shatter --set-mute app app-id on
 ```
 
-The app playback endpoint appears in PipeWire as `shatter.app_playback`. Route an app's playback stream to it using your desktop audio controls. Shatter sends the processed signal to the current PipeWire default playback sink. The engine control socket lives in `$XDG_RUNTIME_DIR/shatter/control.sock` and is accessible only to the current user.
+The engine creates one virtual PipeWire ingress sink for each playback stream and returns streams to ordinary PipeWire routing when stopped. Its control socket lives in `$XDG_RUNTIME_DIR/shatter/control.sock` and is accessible only to the current user.

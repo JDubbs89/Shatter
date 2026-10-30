@@ -27,7 +27,10 @@ namespace {
 constexpr std::string_view kUsage =
     "Usage: shatter <start|status|stop|help>\n"
     "       shatter --list-in|--list-out|--list-all\n"
-    "       shatter --set-gain <channel> <decibels>\n";
+    "       shatter --set-gain app <channel-id> <decibels>\n"
+    "       shatter --set-gain stream <pipewire-node-id> <decibels>\n"
+    "       shatter --set-mute app <channel-id> <on|off>\n"
+    "       shatter --set-mute stream <pipewire-node-id> <on|off>\n";
 constexpr std::string_view kEngineArgument = "--engine";
 
 std::string prepare_control_socket_path()
@@ -221,7 +224,7 @@ int serve()
             break;
         }
 
-        std::array<char, 64> command{};
+        std::array<char, 128> command{};
         const ssize_t received = recv(client_fd, command.data(), command.size() - 1, 0);
         std::string reply = "ERR invalid command\n";
         if (received > 0) {
@@ -249,20 +252,66 @@ int serve()
             } else if (input.starts_with("GAIN ")) {
                 std::istringstream parsed{std::string(input)};
                 std::string action;
-                std::string channel;
+                std::string scope;
+                std::string identifier;
                 float decibels = 0.0F;
                 std::string extra;
-                if (!(parsed >> action >> channel >> decibels) || (parsed >> extra)) {
-                    reply = "ERR expected GAIN <channel> <decibels>\n";
-                } else if (channel != "app-playback") {
-                    reply = "ERR unknown input channel: " + channel + "\n";
-                } else {
+                if (!(parsed >> action >> scope >> identifier >> decibels) || (parsed >> extra)) {
+                    reply = "ERR expected GAIN <app|stream> <id> <decibels>\n";
+                } else if (scope == "APP") {
                     std::string gain_error;
-                    if (audio_engine.set_app_gain_db(decibels, gain_error)) {
-                        reply = "OK app-playback gain set to " + std::to_string(decibels) + " dB\n";
+                    if (audio_engine.set_app_gain_db(identifier, decibels, gain_error)) {
+                        reply = "OK app channel " + identifier + " gain set to " + std::to_string(decibels) + " dB\n";
                     } else {
                         reply = "ERR " + gain_error + "\n";
                     }
+                } else if (scope == "STREAM") {
+                    std::uint32_t stream_id = 0;
+                    const auto [end, error] = std::from_chars(identifier.data(), identifier.data() + identifier.size(), stream_id);
+                    std::string gain_error;
+                    if (error != std::errc{} || end != identifier.data() + identifier.size()) {
+                        reply = "ERR stream id must be a PipeWire node id\n";
+                    } else if (audio_engine.set_stream_gain_db(stream_id, decibels, gain_error)) {
+                        reply = "OK playback stream " + identifier + " gain set to " + std::to_string(decibels) + " dB\n";
+                    } else {
+                        reply = "ERR " + gain_error + "\n";
+                    }
+                } else {
+                    reply = "ERR gain scope must be app or stream\n";
+                }
+            } else if (input.starts_with("MUTE ")) {
+                std::istringstream parsed{std::string(input)};
+                std::string action;
+                std::string scope;
+                std::string identifier;
+                std::string value;
+                std::string extra;
+                bool muted = false;
+                if (!(parsed >> action >> scope >> identifier >> value) || (parsed >> extra) ||
+                    (value != "on" && value != "off")) {
+                    reply = "ERR expected MUTE <app|stream> <id> <on|off>\n";
+                } else if (scope == "APP") {
+                    std::string mute_error;
+                    muted = value == "on";
+                    if (audio_engine.set_app_muted(identifier, muted, mute_error)) {
+                        reply = "OK app channel " + identifier + (muted ? " muted\n" : " unmuted\n");
+                    } else {
+                        reply = "ERR " + mute_error + "\n";
+                    }
+                } else if (scope == "STREAM") {
+                    std::uint32_t stream_id = 0;
+                    const auto [end, error] = std::from_chars(identifier.data(), identifier.data() + identifier.size(), stream_id);
+                    std::string mute_error;
+                    muted = value == "on";
+                    if (error != std::errc{} || end != identifier.data() + identifier.size()) {
+                        reply = "ERR stream id must be a PipeWire node id\n";
+                    } else if (audio_engine.set_stream_muted(stream_id, muted, mute_error)) {
+                        reply = "OK playback stream " + identifier + (muted ? " muted\n" : " unmuted\n");
+                    } else {
+                        reply = "ERR " + mute_error + "\n";
+                    }
+                } else {
+                    reply = "ERR mute scope must be app or stream\n";
                 }
             }
         }
@@ -331,15 +380,43 @@ int run_cli(int argc, char** argv)
             }
         }
 
-        if (argc == 4 && std::string_view(argv[1]) == "--set-gain") {
+        if (argc == 5 && std::string_view(argv[1]) == "--set-gain") {
+            const std::string_view scope(argv[2]);
+            if (scope != "app" && scope != "stream") {
+                std::cerr << "Gain scope must be app or stream.\n";
+                return 2;
+            }
             float decibels = 0.0F;
-            const std::string_view value(argv[3]);
+            const std::string_view value(argv[4]);
             const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), decibels);
             if (error != std::errc{} || end != value.data() + value.size()) {
                 std::cerr << "Gain must be a number in dB.\n";
                 return 2;
             }
-            const std::string command = "GAIN " + std::string(argv[2]) + " " + std::to_string(decibels);
+            const std::string command = "GAIN " + std::string(scope == "app" ? "APP " : "STREAM ") +
+                std::string(argv[3]) + " " + std::to_string(decibels);
+            const std::string response = request(command);
+            if (response.empty()) {
+                std::cerr << "Shatter engine is unavailable; run `shatter start` first.\n";
+                return 1;
+            }
+            if (response.starts_with("ERR ")) {
+                std::cerr << response;
+                return 1;
+            }
+            std::cout << response;
+            return 0;
+        }
+
+        if (argc == 5 && std::string_view(argv[1]) == "--set-mute") {
+            const std::string_view scope(argv[2]);
+            const std::string_view value(argv[4]);
+            if ((scope != "app" && scope != "stream") || (value != "on" && value != "off")) {
+                std::cerr << "Usage: shatter --set-mute <app|stream> <id> <on|off>\n";
+                return 2;
+            }
+            const std::string command = "MUTE " + std::string(scope == "app" ? "APP " : "STREAM ") +
+                std::string(argv[3]) + " " + std::string(value);
             const std::string response = request(command);
             if (response.empty()) {
                 std::cerr << "Shatter engine is unavailable; run `shatter start` first.\n";
