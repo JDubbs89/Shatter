@@ -32,26 +32,30 @@ Run the repository install script to build and install `shatter` into `~/.local/
 sh install.sh
 ```
 
-The background engine discovers application playback streams and assigns each stream to a per-application channel. Use `--list-in` to find app channel IDs and PipeWire stream node IDs, then adjust the whole app or an individual stream with `--set-gain` and `--set-mute`.
+The background engine discovers application playback streams and assigns each stream to a per-application channel. Use `shatter list in` to find app names, channel IDs, and stream names. Gain and mute accept either the current user-facing name or the corresponding ID. Rename an app channel or stream to set a display alias; this does not change app grouping or audio processing. Names must match exactly; if a name is ambiguous, use the channel or PipeWire node ID. Quote names that contain spaces.
 
 ```sh
 shatter start
 shatter status
 shatter stop
-shatter --list-in
-shatter --list-out
-shatter --list-all
-shatter --set-gain app app-id -6
-shatter --set-gain stream 42 -6
-shatter --set-mute app app-id on
-shatter --list-in # choose a capture source node ID
-shatter --set-capture-source 57
-shatter --set-capture-gain -6
-shatter --set-capture-send on
-shatter --profile-start
+shatter list in
+shatter list out
+shatter list all
+shatter set gain app Brave 0
+shatter set gain stream Brave-1 0
+shatter set mute app Brave on
+shatter rename app Brave Browser
+shatter rename stream Brave-1 "Browser music"
+shatter list in # choose a capture source node ID
+shatter set capture source 57
+shatter set gain capture -6
+shatter set capture send on
+shatter start profile
 # use audio normally
-shatter --profile-stop
+shatter stop profile
 ```
+
+The older dash-prefixed command forms remain accepted as compatibility aliases.
 
 Profiling requires the engine's PipeWire output to be ready. The stop command prints callback timing percentiles, callback budget overruns, process CPU time, dropped and unfilled ring-buffer frames, Shatter input ring occupancy, and PipeWire's reported device delay and queued audio. Unfilled ring frames can include idle or silent streams. Callback timing measures Shatter's processing work; ring occupancy, PipeWire delay, and queued audio are separate parts of the audio path, and this summary is not an end-to-end loopback latency measurement.
 

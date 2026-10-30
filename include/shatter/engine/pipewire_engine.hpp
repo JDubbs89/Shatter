@@ -34,9 +34,11 @@ public:
     bool start(std::string& error);
     void stop();
     bool set_app_gain_db(std::string_view channel_id, float decibels, std::string& error);
-    bool set_stream_gain_db(std::uint32_t stream_id, float decibels, std::string& error);
+    bool set_stream_gain_db(std::string_view stream_selector, float decibels, std::string& error);
     bool set_app_muted(std::string_view channel_id, bool muted, std::string& error);
-    bool set_stream_muted(std::uint32_t stream_id, bool muted, std::string& error);
+    bool set_stream_muted(std::string_view stream_selector, bool muted, std::string& error);
+    bool rename_app(std::string_view current_name, std::string new_name, std::string& error);
+    bool rename_stream(std::string_view current_name, std::string new_name, std::string& error);
     bool set_capture_source(std::uint32_t source_node_id, std::string& error);
     bool set_capture_gain_db(float decibels, std::string& error);
     bool set_capture_speaker_send(bool enabled, std::string& error);
@@ -142,6 +144,8 @@ private:
     std::size_t get_or_create_channel_locked(const NodeInfo& node);
     PlaybackStream* find_stream_locked(std::uint32_t node_id);
     AppChannel* find_channel_locked(std::string_view channel_id);
+    AppChannel* resolve_channel_locked(std::string_view selector, std::string& error);
+    PlaybackStream* resolve_stream_locked(std::string_view selector, std::string& error);
     void run_loop();
     void cleanup();
 

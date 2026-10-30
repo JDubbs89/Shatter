@@ -166,25 +166,24 @@ bool PipeWireEngine::set_app_gain_db(std::string_view channel_id, float decibels
         return false;
     }
     std::lock_guard lock(nodes_mutex_);
-    AppChannel* channel = find_channel_locked(channel_id);
+    AppChannel* channel = resolve_channel_locked(channel_id, error);
     if (channel == nullptr) {
-        error = "unknown app channel: " + std::string(channel_id);
         return false;
     }
     channel->target_gain.store(std::pow(10.0F, decibels / 20.0F), std::memory_order_relaxed);
     return true;
 }
 
-bool PipeWireEngine::set_stream_gain_db(std::uint32_t stream_id, float decibels, std::string& error)
+bool PipeWireEngine::set_stream_gain_db(std::string_view stream_selector, float decibels, std::string& error)
 {
     if (!std::isfinite(decibels) || decibels < kMinimumGainDb || decibels > kMaximumGainDb) {
         error = "gain must be between -60 dB and +12 dB";
         return false;
     }
     std::lock_guard lock(nodes_mutex_);
-    PlaybackStream* stream = find_stream_locked(stream_id);
+    PlaybackStream* stream = resolve_stream_locked(stream_selector, error);
     if (stream == nullptr || !stream->active.load(std::memory_order_relaxed)) {
-        error = "unknown or inactive playback stream: " + std::to_string(stream_id);
+        if (error.empty()) error = "unknown or inactive playback stream: " + std::string(stream_selector);
         return false;
     }
     stream->target_gain.store(std::pow(10.0F, decibels / 20.0F), std::memory_order_relaxed);
@@ -194,24 +193,62 @@ bool PipeWireEngine::set_stream_gain_db(std::uint32_t stream_id, float decibels,
 bool PipeWireEngine::set_app_muted(std::string_view channel_id, bool muted, std::string& error)
 {
     std::lock_guard lock(nodes_mutex_);
-    AppChannel* channel = find_channel_locked(channel_id);
+    AppChannel* channel = resolve_channel_locked(channel_id, error);
     if (channel == nullptr) {
-        error = "unknown app channel: " + std::string(channel_id);
         return false;
     }
     channel->muted.store(muted, std::memory_order_relaxed);
     return true;
 }
 
-bool PipeWireEngine::set_stream_muted(std::uint32_t stream_id, bool muted, std::string& error)
+bool PipeWireEngine::set_stream_muted(std::string_view stream_selector, bool muted, std::string& error)
 {
     std::lock_guard lock(nodes_mutex_);
-    PlaybackStream* stream = find_stream_locked(stream_id);
+    PlaybackStream* stream = resolve_stream_locked(stream_selector, error);
     if (stream == nullptr || !stream->active.load(std::memory_order_relaxed)) {
-        error = "unknown or inactive playback stream: " + std::to_string(stream_id);
+        if (error.empty()) error = "unknown or inactive playback stream: " + std::string(stream_selector);
         return false;
     }
     stream->muted.store(muted, std::memory_order_relaxed);
+    return true;
+}
+
+bool PipeWireEngine::rename_app(std::string_view current_name, std::string new_name, std::string& error)
+{
+    if (new_name.empty()) {
+        error = "new app name cannot be empty";
+        return false;
+    }
+    std::lock_guard lock(nodes_mutex_);
+    AppChannel* channel = resolve_channel_locked(current_name, error);
+    if (channel == nullptr) return false;
+    for (std::size_t index = 0; index < allocated_channels_.load(std::memory_order_relaxed); ++index) {
+        if (&app_channels_[index] != channel && app_channels_[index].name == new_name) {
+            error = "another app channel already uses the name: " + new_name;
+            return false;
+        }
+    }
+    channel->name = std::move(new_name);
+    return true;
+}
+
+bool PipeWireEngine::rename_stream(std::string_view current_name, std::string new_name, std::string& error)
+{
+    if (new_name.empty()) {
+        error = "new stream name cannot be empty";
+        return false;
+    }
+    std::lock_guard lock(nodes_mutex_);
+    PlaybackStream* stream = resolve_stream_locked(current_name, error);
+    if (stream == nullptr) return false;
+    for (std::size_t index = 0; index < allocated_streams_.load(std::memory_order_relaxed); ++index) {
+        if (&playback_streams_[index] != stream && playback_streams_[index].in_use &&
+            playback_streams_[index].name == new_name) {
+            error = "another playback stream already uses the name: " + new_name;
+            return false;
+        }
+    }
+    stream->name = std::move(new_name);
     return true;
 }
 
@@ -1053,6 +1090,46 @@ PipeWireEngine::AppChannel* PipeWireEngine::find_channel_locked(std::string_view
         }
     }
     return nullptr;
+}
+
+PipeWireEngine::AppChannel* PipeWireEngine::resolve_channel_locked(std::string_view selector,
+                                                                   std::string& error)
+{
+    if (AppChannel* by_id = find_channel_locked(selector); by_id != nullptr) return by_id;
+    AppChannel* match = nullptr;
+    for (std::size_t index = 0; index < allocated_channels_.load(std::memory_order_relaxed); ++index) {
+        AppChannel& channel = app_channels_[index];
+        if (channel.name != selector) continue;
+        if (match != nullptr) {
+            error = "app name is ambiguous; use its channel ID from --list-in";
+            return nullptr;
+        }
+        match = &channel;
+    }
+    if (match == nullptr) error = "unknown app channel or name: " + std::string(selector);
+    return match;
+}
+
+PipeWireEngine::PlaybackStream* PipeWireEngine::resolve_stream_locked(std::string_view selector,
+                                                                      std::string& error)
+{
+    std::uint32_t node_id = 0;
+    const auto [end, parse_error] = std::from_chars(selector.data(), selector.data() + selector.size(), node_id);
+    if (parse_error == std::errc{} && end == selector.data() + selector.size()) {
+        if (PlaybackStream* by_id = find_stream_locked(node_id); by_id != nullptr) return by_id;
+    }
+    PlaybackStream* match = nullptr;
+    for (std::size_t index = 0; index < allocated_streams_.load(std::memory_order_relaxed); ++index) {
+        PlaybackStream& stream = playback_streams_[index];
+        if (!stream.in_use || stream.name != selector) continue;
+        if (match != nullptr) {
+            error = "stream name is ambiguous; use its PipeWire node ID from --list-in";
+            return nullptr;
+        }
+        match = &stream;
+    }
+    if (match == nullptr) error = "unknown playback stream or name: " + std::string(selector);
+    return match;
 }
 
 void PipeWireEngine::run_loop()

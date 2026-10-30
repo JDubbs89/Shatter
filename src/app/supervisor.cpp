@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
+#include <iomanip>
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
@@ -20,21 +21,22 @@
 #include <sys/un.h>
 #include <thread>
 #include <unistd.h>
+#include <vector>
 
 namespace shatter::app {
 namespace {
 
 constexpr std::string_view kUsage =
-    "Usage: shatter <start|status|stop|help>\n"
-    "       shatter --list-in|--list-out|--list-all\n"
-    "       shatter --profile-start|--profile-stop\n"
-    "       shatter --set-gain app <channel-id> <decibels>\n"
-    "       shatter --set-gain stream <pipewire-node-id> <decibels>\n"
-    "       shatter --set-mute app <channel-id> <on|off>\n"
-    "       shatter --set-mute stream <pipewire-node-id> <on|off>\n"
-    "       shatter --set-capture-source <pipewire-source-node-id>\n"
-    "       shatter --set-capture-gain <decibels>\n"
-    "       shatter --set-capture-send <on|off>\n";
+    "Usage: shatter start [engine|profile]\n"
+    "       shatter status [engine]\n"
+    "       shatter stop [engine|profile]\n"
+    "       shatter list <in|out|all>\n"
+    "       shatter set gain <app|stream> <name-or-id> <decibels>\n"
+    "       shatter set gain capture <decibels>\n"
+    "       shatter set mute <app|stream> <name-or-id> <on|off>\n"
+    "       shatter set capture <source|send> <value>\n"
+    "       shatter rename <app|stream> <old-name> <new-name>\n"
+    "       shatter help\n";
 constexpr std::string_view kEngineArgument = "--engine";
 constexpr std::string_view kStartupBanner = R"( ______     __  __     ______     ______   ______   ______     ______
 ╱╲  ___╲   ╱╲ ╲_╲ ╲   ╱╲  __ ╲   ╱╲__  _╲ ╱╲__  _╲ ╱╲  ___╲   ╱╲  == ╲
@@ -234,7 +236,7 @@ int serve()
             break;
         }
 
-        std::array<char, 128> command{};
+        std::array<char, 512> command{};
         const ssize_t received = recv(client_fd, command.data(), command.size() - 1, 0);
         std::string reply = "ERR invalid command\n";
         if (received > 0) {
@@ -270,6 +272,26 @@ int serve()
                 std::string profile_error;
                 const std::string report = audio_engine.profile_stop(profile_error);
                 reply = report.empty() ? "ERR " + profile_error + "\n" : report;
+            } else if (input.starts_with("RENAME ")) {
+                std::istringstream parsed{std::string(input)};
+                std::string action;
+                std::string scope;
+                std::string old_name;
+                std::string new_name;
+                std::string extra;
+                std::string rename_error;
+                if (!(parsed >> action >> scope >> std::quoted(old_name) >> std::quoted(new_name)) ||
+                    (parsed >> extra)) {
+                    reply = "ERR expected RENAME <app|stream> <old-name> <new-name>\n";
+                } else if (scope == "APP" && audio_engine.rename_app(old_name, new_name, rename_error)) {
+                    reply = "OK app channel renamed to " + new_name + "\n";
+                } else if (scope == "STREAM" && audio_engine.rename_stream(old_name, new_name, rename_error)) {
+                    reply = "OK playback stream renamed to " + new_name + "\n";
+                } else if (scope != "APP" && scope != "STREAM") {
+                    reply = "ERR rename scope must be app or stream\n";
+                } else {
+                    reply = "ERR " + rename_error + "\n";
+                }
             } else if (input.starts_with("CAPTURE-SOURCE ")) {
                 std::string value(input.substr(std::string_view("CAPTURE-SOURCE ").size()));
                 std::uint32_t source_id = PW_ID_ANY;
@@ -312,8 +334,8 @@ int serve()
                 std::string identifier;
                 float decibels = 0.0F;
                 std::string extra;
-                if (!(parsed >> action >> scope >> identifier >> decibels) || (parsed >> extra)) {
-                    reply = "ERR expected GAIN <app|stream> <id> <decibels>\n";
+                if (!(parsed >> action >> scope >> std::quoted(identifier) >> decibels) || (parsed >> extra)) {
+                    reply = "ERR expected GAIN <app|stream> <name-or-id> <decibels>\n";
                 } else if (scope == "APP") {
                     std::string gain_error;
                     if (audio_engine.set_app_gain_db(identifier, decibels, gain_error)) {
@@ -322,12 +344,8 @@ int serve()
                         reply = "ERR " + gain_error + "\n";
                     }
                 } else if (scope == "STREAM") {
-                    std::uint32_t stream_id = 0;
-                    const auto [end, error] = std::from_chars(identifier.data(), identifier.data() + identifier.size(), stream_id);
                     std::string gain_error;
-                    if (error != std::errc{} || end != identifier.data() + identifier.size()) {
-                        reply = "ERR stream id must be a PipeWire node id\n";
-                    } else if (audio_engine.set_stream_gain_db(stream_id, decibels, gain_error)) {
+                    if (audio_engine.set_stream_gain_db(identifier, decibels, gain_error)) {
                         reply = "OK playback stream " + identifier + " gain set to " + std::to_string(decibels) + " dB\n";
                     } else {
                         reply = "ERR " + gain_error + "\n";
@@ -343,7 +361,7 @@ int serve()
                 std::string value;
                 std::string extra;
                 bool muted = false;
-                if (!(parsed >> action >> scope >> identifier >> value) || (parsed >> extra) ||
+                if (!(parsed >> action >> scope >> std::quoted(identifier) >> value) || (parsed >> extra) ||
                     (value != "on" && value != "off")) {
                     reply = "ERR expected MUTE <app|stream> <id> <on|off>\n";
                 } else if (scope == "APP") {
@@ -355,13 +373,9 @@ int serve()
                         reply = "ERR " + mute_error + "\n";
                     }
                 } else if (scope == "STREAM") {
-                    std::uint32_t stream_id = 0;
-                    const auto [end, error] = std::from_chars(identifier.data(), identifier.data() + identifier.size(), stream_id);
                     std::string mute_error;
                     muted = value == "on";
-                    if (error != std::errc{} || end != identifier.data() + identifier.size()) {
-                        reply = "ERR stream id must be a PipeWire node id\n";
-                    } else if (audio_engine.set_stream_muted(stream_id, muted, mute_error)) {
+                    if (audio_engine.set_stream_muted(identifier, muted, mute_error)) {
                         reply = "OK playback stream " + identifier + (muted ? " muted\n" : " unmuted\n");
                     } else {
                         reply = "ERR " + mute_error + "\n";
@@ -410,6 +424,58 @@ int run_cli(int argc, char** argv)
         return 0;
     }
 
+    // Normalize the action/target CLI to the existing command handlers below.
+    // The dashed spellings remain accepted as compatibility aliases.
+    std::vector<std::string> normalized{argv[0]};
+    const auto arg = [argc, argv](int index) -> std::string_view {
+        return index < argc ? std::string_view(argv[index]) : std::string_view{};
+    };
+    if (arg(1) == "list" && argc == 3) {
+        const std::string_view listing = arg(2);
+        if (listing == "in") normalized.emplace_back("--list-in");
+        else if (listing == "out") normalized.emplace_back("--list-out");
+        else if (listing == "all") normalized.emplace_back("--list-all");
+    } else if ((arg(1) == "start" || arg(1) == "stop") && argc == 3 && arg(2) == "profile") {
+        normalized.emplace_back(arg(1) == "start" ? "--profile-start" : "--profile-stop");
+    } else if ((arg(1) == "start" || arg(1) == "stop" || arg(1) == "status") &&
+               argc == 3 && arg(2) == "engine") {
+        normalized.emplace_back(arg(1));
+    } else if (arg(1) == "set" && arg(2) == "gain" && arg(3) == "capture" && argc == 5) {
+        normalized.emplace_back("--set-capture-gain");
+        normalized.emplace_back(argv[4]);
+    } else if (arg(1) == "set" && arg(2) == "gain" && argc == 6) {
+        if (arg(3) == "app" || arg(3) == "stream") {
+            normalized.emplace_back("--set-gain");
+            normalized.emplace_back(argv[3]);
+            normalized.emplace_back(argv[4]);
+            normalized.emplace_back(argv[5]);
+        }
+    } else if (arg(1) == "set" && arg(2) == "mute" && argc == 6) {
+        normalized.emplace_back("--set-mute");
+        normalized.emplace_back(argv[3]);
+        normalized.emplace_back(argv[4]);
+        normalized.emplace_back(argv[5]);
+    } else if (arg(1) == "set" && arg(2) == "capture" && argc == 5) {
+        if (arg(3) == "source") {
+            normalized.emplace_back("--set-capture-source");
+            normalized.emplace_back(argv[4]);
+        } else if (arg(3) == "send") {
+            normalized.emplace_back("--set-capture-send");
+            normalized.emplace_back(argv[4]);
+        }
+    } else if (arg(1) == "rename" && argc == 5) {
+        normalized.emplace_back("--rename");
+        normalized.emplace_back(argv[2]);
+        normalized.emplace_back(argv[3]);
+        normalized.emplace_back(argv[4]);
+    }
+    if (normalized.size() > 1) {
+        std::vector<char*> normalized_argv;
+        normalized_argv.reserve(normalized.size());
+        for (std::string& value : normalized) normalized_argv.push_back(value.data());
+        return run_cli(static_cast<int>(normalized_argv.size()), normalized_argv.data());
+    }
+
     try {
         if (argc == 2) {
             const std::string_view command(argv[1]);
@@ -453,8 +519,10 @@ int run_cli(int argc, char** argv)
                 std::cerr << "Gain must be a number in dB.\n";
                 return 2;
             }
-            const std::string command = "GAIN " + std::string(scope == "app" ? "APP " : "STREAM ") +
-                std::string(argv[3]) + " " + std::to_string(decibels);
+            std::ostringstream command_builder;
+            command_builder << "GAIN " << (scope == "app" ? "APP " : "STREAM ")
+                            << std::quoted(argv[3]) << ' ' << std::to_string(decibels);
+            const std::string command = command_builder.str();
             const std::string response = request(command);
             if (response.empty()) {
                 std::cerr << "Shatter engine is unavailable; run `shatter start` first.\n";
@@ -475,9 +543,33 @@ int run_cli(int argc, char** argv)
                 std::cerr << "Usage: shatter --set-mute <app|stream> <id> <on|off>\n";
                 return 2;
             }
-            const std::string command = "MUTE " + std::string(scope == "app" ? "APP " : "STREAM ") +
-                std::string(argv[3]) + " " + std::string(value);
+            std::ostringstream command_builder;
+            command_builder << "MUTE " << (scope == "app" ? "APP " : "STREAM ")
+                            << std::quoted(argv[3]) << ' ' << value;
+            const std::string command = command_builder.str();
             const std::string response = request(command);
+            if (response.empty()) {
+                std::cerr << "Shatter engine is unavailable; run `shatter start` first.\n";
+                return 1;
+            }
+            if (response.starts_with("ERR ")) {
+                std::cerr << response;
+                return 1;
+            }
+            std::cout << response;
+            return 0;
+        }
+
+        if (argc == 5 && std::string_view(argv[1]) == "--rename") {
+            const std::string_view scope(argv[2]);
+            if (scope != "app" && scope != "stream") {
+                std::cerr << "Rename scope must be app or stream.\n";
+                return 2;
+            }
+            std::ostringstream command_builder;
+            command_builder << "RENAME " << (scope == "app" ? "APP " : "STREAM ")
+                            << std::quoted(argv[3]) << ' ' << std::quoted(argv[4]);
+            const std::string response = request(command_builder.str());
             if (response.empty()) {
                 std::cerr << "Shatter engine is unavailable; run `shatter start` first.\n";
                 return 1;
