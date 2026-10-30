@@ -10,10 +10,27 @@ if [ "$(id -u)" -eq 0 ] && [ -z "${SHATTER_INSTALL_PREFIX:-}" ]; then
     exit 1
 fi
 
-if [ "$(id -u)" -ne 0 ] && [ -f "$build_dir/CMakeCache.txt" ] && [ ! -w "$build_dir/CMakeCache.txt" ]; then
-    echo "The build directory contains files not writable by this user: $build_dir" >&2
-    echo "Remove that generated build directory or set SHATTER_BUILD_DIR to a writable path, then rerun this script." >&2
-    exit 1
+if [ "$(id -u)" -ne 0 ] && [ -e "$build_dir" ]; then
+    if [ ! -w "$build_dir" ]; then
+        echo "The build directory is not writable by this user: $build_dir" >&2
+        echo "Remove that generated build directory or set SHATTER_BUILD_DIR to a writable path, then rerun this script." >&2
+        exit 1
+    fi
+
+    for generated_file in CMakeCache.txt install_manifest.txt; do
+        generated_path="$build_dir/$generated_file"
+        if [ -e "$generated_path" ] && [ ! -w "$generated_path" ]; then
+            if [ "$generated_file" = install_manifest.txt ] && [ -w "$build_dir" ]; then
+                # CMake replaces this generated file during installation. Remove
+                # an old root-owned manifest so the normal install can recreate it.
+                rm -f -- "$generated_path"
+                continue
+            fi
+            echo "A generated build file is not writable by this user: $generated_path" >&2
+            echo "Remove that generated build directory or set SHATTER_BUILD_DIR to a writable path, then rerun this script." >&2
+            exit 1
+        fi
+    done
 fi
 
 if ! command -v pkg-config >/dev/null 2>&1 || ! pkg-config --exists libpipewire-0.3; then

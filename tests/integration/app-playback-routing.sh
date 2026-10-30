@@ -117,10 +117,32 @@ if [ -z "$app_a_id" ]; then
     exit 1
 fi
 
+if "$binary" --profile-stop >/dev/null 2>&1; then
+    echo "expected profile stop without a running profile to fail" >&2
+    exit 1
+fi
+"$binary" --profile-start
+if "$binary" --profile-start >/dev/null 2>&1; then
+    echo "expected a second profile start to fail while profiling is active" >&2
+    exit 1
+fi
+sleep 0.25
+profile=$($binary --profile-stop)
+case "$profile" in
+    *"Shatter runtime profile"*"Speaker output callbacks:"*"Shatter input ring occupancy avg/max:"*"PipeWire reported max device delay:"*) ;;
+    *) echo "profile summary is missing runtime metrics: $profile" >&2; exit 1 ;;
+esac
+output_callbacks=$(printf '%s\n' "$profile" | awk -F': ' '/Speaker output callbacks:/ { print $2; exit }')
+if [ -z "$output_callbacks" ] || [ "$output_callbacks" -le 0 ]; then
+    echo "profile did not record speaker output callbacks: $profile" >&2
+    exit 1
+fi
+
 record_monitor()
 {
     destination=$1
-    pw-record --target 0 --rate 48000 --channels 2 --format f32 --raw --sample-count 48000 "$destination" \
+    sample_count=${2:-48000}
+    pw-record --target 0 --rate 48000 --channels 2 --format f32 --raw --sample-count "$sample_count" "$destination" \
         >"$test_root/record.log" 2>&1 &
     record_pid=$!
     ready=0
@@ -138,7 +160,8 @@ record_monitor()
     wait "$record_pid" || [ -s "$destination" ]
 }
 
-record_monitor "$test_root/baseline.raw"
+sleep 1
+record_monitor "$test_root/baseline.raw" 96000
 "$binary" --set-gain app "$app_a_id" -20
 sleep 0.25
 record_monitor "$test_root/app-quiet.raw"
@@ -245,6 +268,36 @@ def rms(path):
     samples = struct.unpack("<%df" % (len(data) // 4), data)
     return math.sqrt(sum(sample * sample for sample in samples) / len(samples)) if samples else 0.0
 
+baseline_data = open(sys.argv[1], "rb").read()
+baseline_samples = struct.unpack("<%df" % (len(baseline_data) // 4), baseline_data)
+window_frames = 480
+window_rms = [
+    math.sqrt(sum(sample * sample for sample in baseline_samples[start * 2:(start + window_frames) * 2]) /
+              (window_frames * 2))
+    for start in range(0, len(baseline_samples) // 2 - window_frames + 1, window_frames)
+]
+steady_windows = window_rms[10:-10]
+median_window = sorted(steady_windows)[len(steady_windows) // 2]
+quiet_windows = [value < median_window * 0.2 for value in steady_windows]
+longest_quiet_run = current_quiet_run = 0
+quiet_runs = []
+run_start = None
+for index, is_quiet in enumerate(quiet_windows):
+    if is_quiet:
+        if run_start is None:
+            run_start = index
+        current_quiet_run += 1
+        longest_quiet_run = max(longest_quiet_run, current_quiet_run)
+    else:
+        if current_quiet_run:
+            quiet_runs.append((run_start * 10 + 100, current_quiet_run * 10))
+        current_quiet_run = 0
+        run_start = None
+if current_quiet_run:
+    quiet_runs.append((run_start * 10 + 100, current_quiet_run * 10))
+if median_window < 0.01 or longest_quiet_run >= 5:
+    raise SystemExit("speaker output contains sustained audio gaps: median_window_rms=%s gaps_ms=%s" %
+                     (median_window, quiet_runs))
 baseline = rms(sys.argv[1])
 quiet = rms(sys.argv[2])
 paired = rms(sys.argv[3])

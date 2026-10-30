@@ -15,6 +15,7 @@
 #include <cstring>
 #include <iomanip>
 #include <sstream>
+#include <sys/resource.h>
 #include <vector>
 
 namespace shatter::engine {
@@ -323,6 +324,64 @@ bool PipeWireEngine::available() const noexcept
     return available_ && output_linked_.load(std::memory_order_relaxed);
 }
 
+namespace {
+
+std::uint64_t timeval_to_microseconds(const timeval& value)
+{
+    return static_cast<std::uint64_t>(value.tv_sec) * 1'000'000ULL +
+        static_cast<std::uint64_t>(value.tv_usec);
+}
+
+} // namespace
+
+bool PipeWireEngine::profile_start(std::string& error)
+{
+    if (!available()) {
+        error = "PipeWire audio is unavailable; start profiling after audio becomes ready";
+        return false;
+    }
+    if (profile_running_.load(std::memory_order_acquire)) {
+        error = "a profiling run is already active";
+        return false;
+    }
+
+    struct rusage usage {};
+    if (getrusage(RUSAGE_SELF, &usage) < 0) {
+        error = "could not read process CPU usage";
+        return false;
+    }
+    profile_user_cpu_us_ = timeval_to_microseconds(usage.ru_utime);
+    profile_system_cpu_us_ = timeval_to_microseconds(usage.ru_stime);
+    profile_started_ = std::chrono::steady_clock::now();
+    profiler_.start();
+    profile_running_.store(true, std::memory_order_release);
+    return true;
+}
+
+std::string PipeWireEngine::profile_stop(std::string& error)
+{
+    if (!profile_running_.exchange(false, std::memory_order_acq_rel)) {
+        error = "no profiling run is active";
+        return {};
+    }
+    profiler_.stop();
+    const auto elapsed = std::chrono::steady_clock::now() - profile_started_;
+    const auto wall_ns = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count());
+
+    struct rusage usage {};
+    if (getrusage(RUSAGE_SELF, &usage) < 0) {
+        error = "profiling stopped, but process CPU usage could not be read";
+        return {};
+    }
+    const auto user_cpu_us = timeval_to_microseconds(usage.ru_utime) - profile_user_cpu_us_;
+    const auto system_cpu_us = timeval_to_microseconds(usage.ru_stime) - profile_system_cpu_us_;
+    const double cpu_seconds = static_cast<double>(user_cpu_us + system_cpu_us) / 1'000'000.0;
+    const double cpu_percent = wall_ns == 0 ? 0.0 : cpu_seconds * 1'000'000'000.0 * 100.0 /
+        static_cast<double>(wall_ns);
+    return profiler_.report(wall_ns, cpu_seconds, cpu_percent);
+}
+
 void PipeWireEngine::on_output_state_changed(void* data, pw_stream_state, pw_stream_state state,
                                              const char* error)
 {
@@ -482,6 +541,7 @@ void PipeWireEngine::on_global_remove(void* data, std::uint32_t id)
 
 void PipeWireEngine::stream_input_process(PlaybackStream& stream)
 {
+    RuntimeProfiler::Scope profile_scope(profiler_, RuntimeProfiler::Callback::input);
     pw_buffer* buffer = pw_stream_dequeue_buffer(stream.sink);
     if (buffer == nullptr) {
         return;
@@ -498,7 +558,9 @@ void PipeWireEngine::stream_input_process(PlaybackStream& stream)
                 ? 0.0F : stream.target_gain.load(std::memory_order_relaxed);
             const float increment = frames == 0 ? 0.0F
                 : (target - stream.smoothed_gain) / static_cast<float>(frames);
-            stream.audio.write_with_gain_ramp(samples, frames, stream.smoothed_gain, increment);
+            const auto written = stream.audio.write_with_gain_ramp(samples, frames, stream.smoothed_gain, increment);
+            profile_scope.set_frames(frames, kSampleRate);
+            profile_scope.record_input_overrun(frames - written);
             stream.smoothed_gain = target;
         }
     }
@@ -507,6 +569,7 @@ void PipeWireEngine::stream_input_process(PlaybackStream& stream)
 
 void PipeWireEngine::output_process()
 {
+    RuntimeProfiler::Scope profile_scope(profiler_, RuntimeProfiler::Callback::output);
     pw_buffer* buffer = pw_stream_dequeue_buffer(speaker_output_);
     if (buffer == nullptr) {
         return;
@@ -514,7 +577,24 @@ void PipeWireEngine::output_process()
     if (buffer->buffer != nullptr && buffer->buffer->n_datas > 0) {
         spa_data& data = buffer->buffer->datas[0];
         if (data.data != nullptr && data.chunk != nullptr) {
-            const auto frames = static_cast<std::size_t>(data.maxsize) / (sizeof(float) * kChannels);
+            const auto capacity_frames = static_cast<std::size_t>(data.maxsize) / (sizeof(float) * kChannels);
+            // requested is a frame count; maxsize is the backing buffer's byte capacity.
+            const auto requested_frames = buffer->requested == 0
+                ? capacity_frames
+                : static_cast<std::size_t>(buffer->requested);
+            const auto frames = std::min(capacity_frames, requested_frames);
+            profile_scope.set_frames(frames, kSampleRate);
+            if (profiler_.active()) {
+                pw_time timing{};
+                if (pw_stream_get_time_n(speaker_output_, &timing, sizeof(timing)) == 0 && timing.rate.denom != 0) {
+                    const auto delay_ns = timing.delay > 0
+                        ? static_cast<std::uint64_t>(timing.delay) * timing.rate.num * 1'000'000'000ULL /
+                            timing.rate.denom
+                        : 0;
+                    const auto queued_frames = timing.queued / (sizeof(float) * kChannels);
+                    profile_scope.record_pipewire_time(delay_ns, queued_frames);
+                }
+            }
             auto* samples = reinterpret_cast<float*>(data.data);
             std::fill(samples, samples + frames * kChannels, 0.0F);
 
@@ -557,7 +637,9 @@ void PipeWireEngine::output_process()
                             }
                             continue;
                         }
-                        stream.audio.accumulate(channel_mix.data(), block_frames, 1.0F);
+                        profile_scope.record_ring_occupancy(stream.audio.available_frames());
+                        const auto consumed = stream.audio.accumulate(channel_mix.data(), block_frames, 1.0F);
+                        profile_scope.record_unfilled_mix_frames(block_frames - consumed);
                         stream.mixer_users.fetch_sub(1, std::memory_order_release);
                     }
 

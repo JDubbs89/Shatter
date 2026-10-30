@@ -1,12 +1,14 @@
 #pragma once
 
 #include "shatter/engine/audio_ring.hpp"
+#include "shatter/engine/runtime_profiler.hpp"
 
 #include <pipewire/extensions/metadata.h>
 #include <pipewire/pipewire.h>
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -37,6 +39,8 @@ public:
     bool set_stream_muted(std::uint32_t stream_id, bool muted, std::string& error);
     std::string list_inputs() const;
     std::string list_outputs() const;
+    bool profile_start(std::string& error);
+    std::string profile_stop(std::string& error);
     bool available() const noexcept;
 
 private:
@@ -137,6 +141,11 @@ private:
     std::atomic<std::uint32_t> speaker_node_id_{PW_ID_ANY};
     std::atomic<bool> output_linked_{false};
     float smoothed_gain_ = 1.0F;
+    RuntimeProfiler profiler_;
+    std::atomic<bool> profile_running_{false};
+    std::chrono::steady_clock::time_point profile_started_{};
+    std::uint64_t profile_user_cpu_us_ = 0;
+    std::uint64_t profile_system_cpu_us_ = 0;
 };
 
 } // namespace shatter::engine

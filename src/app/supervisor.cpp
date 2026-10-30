@@ -27,6 +27,7 @@ namespace {
 constexpr std::string_view kUsage =
     "Usage: shatter <start|status|stop|help>\n"
     "       shatter --list-in|--list-out|--list-all\n"
+    "       shatter --profile-start|--profile-stop\n"
     "       shatter --set-gain app <channel-id> <decibels>\n"
     "       shatter --set-gain stream <pipewire-node-id> <decibels>\n"
     "       shatter --set-mute app <channel-id> <on|off>\n"
@@ -249,6 +250,17 @@ int serve()
                 reply = audio_engine.list_outputs();
             } else if (input == "LIST-ALL") {
                 reply = audio_engine.list_inputs() + "\n" + audio_engine.list_outputs();
+            } else if (input == "PROFILE-START") {
+                std::string profile_error;
+                if (audio_engine.profile_start(profile_error)) {
+                    reply = "OK profiling started\n";
+                } else {
+                    reply = "ERR " + profile_error + "\n";
+                }
+            } else if (input == "PROFILE-STOP") {
+                std::string profile_error;
+                const std::string report = audio_engine.profile_stop(profile_error);
+                reply = report.empty() ? "ERR " + profile_error + "\n" : report;
             } else if (input.starts_with("GAIN ")) {
                 std::istringstream parsed{std::string(input)};
                 std::string action;
@@ -364,6 +376,10 @@ int run_cli(int argc, char** argv)
                 request_command = "LIST-OUT";
             } else if (command == "--list-all") {
                 request_command = "LIST-ALL";
+            } else if (command == "--profile-start") {
+                request_command = "PROFILE-START";
+            } else if (command == "--profile-stop") {
+                request_command = "PROFILE-STOP";
             }
             if (!request_command.empty()) {
                 const std::string response = request(request_command);

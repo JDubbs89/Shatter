@@ -97,6 +97,13 @@ public:
         return consumed;
     }
 
+    std::size_t available_frames() const noexcept
+    {
+        const auto write_frame = write_frame_.load(std::memory_order_acquire);
+        const auto read_frame = read_frame_.load(std::memory_order_acquire);
+        return std::min<std::size_t>(static_cast<std::size_t>(write_frame - read_frame), capacity_frames);
+    }
+
 
 private:
     std::unique_ptr<float[]> samples_;
