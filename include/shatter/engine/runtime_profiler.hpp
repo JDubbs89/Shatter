@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <iomanip>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -133,28 +134,44 @@ public:
                        double process_cpu_percent) const
     {
         std::ostringstream out;
+        out << std::fixed << std::setprecision(2);
         out << "Shatter runtime profile\n"
-            << "Duration: " << wall_ns / 1'000'000'000.0 << " s\n"
-            << "Process CPU: " << process_cpu_seconds << " s (" << process_cpu_percent
-            << "% of one CPU core)\n"
-            << "Callback percentiles use approximate log2 histogram buckets.\n";
+            << "Duration: " << wall_ns / 1'000'000'000.0 << " s  |  Process CPU: "
+            << process_cpu_seconds << " s (" << process_cpu_percent << "% of one CPU core)\n\n"
+            << "Callback timing (durations in microseconds; percentiles are approximate)\n";
+        out << "+----------------+--------+--------+--------+--------+--------+--------+------------+----------+\n"
+            << "| Callback       | Calls  | Avg    | P50    | P95    | P99    | Max    | Frames     | Overruns |\n"
+            << "+----------------+--------+--------+--------+--------+--------+--------+------------+----------+\n";
         append_group(out, "Playback input", groups_[0]);
         append_group(out, "Speaker output", groups_[1]);
+        out << "+----------------+--------+--------+--------+--------+--------+--------+------------+----------+\n\n"
+            << "Buffering and PipeWire timing\n"
+            << '+' << std::string(42, '-') << '+' << std::string(46, '-') << "+\n"
+            << "| " << std::left << std::setw(40) << "Metric" << " | "
+            << std::setw(44) << "Value" << " |\n"
+            << '+' << std::string(42, '-') << '+' << std::string(46, '-') << "+\n";
         const auto ring_samples = ring_occupancy_samples_.load(std::memory_order_relaxed);
-        const auto average_ring_frames = ring_samples == 0 ? 0 :
-            ring_occupancy_sum_.load(std::memory_order_relaxed) / ring_samples;
-        out << "Input ring dropped frames: " << input_overrun_frames_.load(std::memory_order_relaxed) << '\n'
-            << "Ring frames unavailable at mix time: " << unfilled_mix_frames_.load(std::memory_order_relaxed)
-            << " (includes idle or silent streams)\n"
-            << "Shatter input ring occupancy avg/max: " << average_ring_frames << "/"
-            << ring_occupancy_max_.load(std::memory_order_relaxed) << " frames ("
-            << average_ring_frames * 1000.0 / 48000.0 << "/"
-            << ring_occupancy_max_.load(std::memory_order_relaxed) * 1000.0 / 48000.0 << " ms)\n"
-            << "PipeWire reported max device delay: "
-            << pipewire_delay_ns_.load(std::memory_order_relaxed) / 1'000'000.0 << " ms\n"
-            << "PipeWire reported max queued audio: "
-            << pipewire_queue_frames_.load(std::memory_order_relaxed) << " frames\n"
-            << "Note: PipeWire delay excludes queued buffers; the displayed delay and queue are separate.\n";
+        const double average_ring_frames = ring_samples == 0 ? 0.0 :
+            static_cast<double>(ring_occupancy_sum_.load(std::memory_order_relaxed)) / ring_samples;
+        const auto maximum_ring_frames = ring_occupancy_max_.load(std::memory_order_relaxed);
+        append_metric(out, "Input ring dropped frames", std::to_string(
+            input_overrun_frames_.load(std::memory_order_relaxed)));
+        append_metric(out, "Frames unavailable at mix time", std::to_string(
+            unfilled_mix_frames_.load(std::memory_order_relaxed)));
+        std::ostringstream occupancy;
+        occupancy << std::fixed << std::setprecision(1) << average_ring_frames << "/"
+                  << maximum_ring_frames << " frames (" << average_ring_frames * 1000.0 / 48000.0
+                  << "/" << maximum_ring_frames * 1000.0 / 48000.0 << " ms)";
+        append_metric(out, "Shatter input ring occupancy avg/max", occupancy.str());
+        std::ostringstream device_delay;
+        device_delay << std::fixed << std::setprecision(3)
+                     << pipewire_delay_ns_.load(std::memory_order_relaxed) / 1'000'000.0 << " ms";
+        append_metric(out, "PipeWire max device delay", device_delay.str());
+        append_metric(out, "PipeWire max queued audio", std::to_string(
+            pipewire_queue_frames_.load(std::memory_order_relaxed)) + " frames");
+        out << '+' << std::string(42, '-') << '+' << std::string(46, '-') << "+\n"
+            << "Note: unavailable mix frames can include idle/silent streams. PipeWire delay excludes queued buffers.\n"
+            << "Callback percentiles are approximate log2 histogram bucket bounds.\n";
         return out.str();
     }
 
@@ -207,14 +224,23 @@ private:
     static void append_group(std::ostringstream& out, const char* name, const Group& group)
     {
         const auto calls = group.calls.load(std::memory_order_relaxed);
-        const auto average = calls == 0 ? 0 : group.total_ns.load(std::memory_order_relaxed) / calls;
-        out << name << " callbacks: " << calls << '\n'
-            << "  Duration avg/p50/p95/p99/max: " << average << "/"
-            << percentile_ns(group, calls, 50) << "/" << percentile_ns(group, calls, 95) << "/"
-            << percentile_ns(group, calls, 99) << "/" << group.max_ns.load(std::memory_order_relaxed)
-            << " ns\n"
-            << "  Frames processed: " << group.frames.load(std::memory_order_relaxed) << '\n'
-            << "  Callback budget overruns: " << group.deadline_misses.load(std::memory_order_relaxed) << '\n';
+        const auto average = calls == 0 ? 0.0 :
+            static_cast<double>(group.total_ns.load(std::memory_order_relaxed)) / calls / 1000.0;
+        out << "| " << std::left << std::setw(14) << name << " | "
+            << std::right << std::setw(6) << calls << " | " << std::setw(6) << average << " | "
+            << std::setw(6) << percentile_ns(group, calls, 50) / 1000.0 << " | "
+            << std::setw(6) << percentile_ns(group, calls, 95) / 1000.0 << " | "
+            << std::setw(6) << percentile_ns(group, calls, 99) / 1000.0 << " | "
+            << std::setw(6) << group.max_ns.load(std::memory_order_relaxed) / 1000.0 << " | "
+            << std::setw(10) << group.frames.load(std::memory_order_relaxed) << " | "
+            << std::setw(8) << group.deadline_misses.load(std::memory_order_relaxed) << " |\n"
+            << std::left;
+    }
+
+    static void append_metric(std::ostringstream& out, const char* name, const std::string& value)
+    {
+        out << "| " << std::left << std::setw(40) << name << " | "
+            << std::setw(44) << value << " |\n";
     }
 
     std::array<Group, 2> groups_{};
