@@ -1,6 +1,6 @@
-// Process entry point. Argument parsing and startup belong to app::Supervisor.
+#include "shatter/app/supervisor.hpp"
 
-int main()
+int main(int argc, char** argv)
 {
-    return 0;
+    return shatter::app::run_cli(argc, argv);
 }

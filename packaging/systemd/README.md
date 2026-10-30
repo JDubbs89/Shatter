@@ -1,3 +1,3 @@
 # systemd user service
 
-The design targets a per-user service started with the desktop session after PipeWire and WirePlumber are available. Add a unit file after the daemon's startup, readiness, restart, and failure-fallback behavior has been prototyped.
+Automatic startup is deferred. The initial prototype starts and stops the per-user engine through the `shatter` CLI. A systemd user unit can be added after startup, readiness, restart, and failure-fallback behavior has been prototyped.

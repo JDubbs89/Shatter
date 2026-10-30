@@ -23,3 +23,21 @@ cmake --build build
 ```
 
 PipeWire and other runtime dependencies will be added when their integration modules are implemented.
+
+## Install the local command
+
+Run the repository install script to build and install `shatter` into `~/.local/bin`:
+
+```sh
+sh install.sh
+```
+
+The initial command manages the background engine process; audio routing and processing are not implemented yet.
+
+```sh
+shatter start
+shatter status
+shatter stop
+```
+
+The engine control socket lives in `$XDG_RUNTIME_DIR/shatter/control.sock` and is accessible only to the current user.

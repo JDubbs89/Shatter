@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(pwmixd
+project(shatter
     VERSION 0.1.0
-    DESCRIPTION "PipeWire-based desktop audio mixer daemon"
+    DESCRIPTION "Local desktop audio mixer daemon"
     LANGUAGES CXX
 )
 
@@ -10,7 +10,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-add_executable(pwmixd
+add_executable(shatter
     src/main.cpp
     src/api/osc.cpp
     src/api/server.cpp
@@ -28,9 +28,17 @@ add_executable(pwmixd
     src/state/store.cpp
 )
 
-target_include_directories(pwmixd PRIVATE include)
-target_compile_features(pwmixd PRIVATE cxx_std_20)
+target_include_directories(shatter PRIVATE include)
+target_compile_features(shatter PRIVATE cxx_std_20)
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    target_compile_options(pwmixd PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(shatter PRIVATE -Wall -Wextra -Wpedantic)
 endif()
+
+install(TARGETS shatter RUNTIME DESTINATION bin)
+
+enable_testing()
+add_test(
+    NAME cli_lifecycle
+    COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/tests/unit/cli-lifecycle.sh" "$<TARGET_FILE:shatter>"
+)
