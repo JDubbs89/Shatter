@@ -87,7 +87,7 @@ for path, seed in ((sys.argv[1], 440), (sys.argv[2], 880)):
         output.setnchannels(2)
         output.setsampwidth(2)
         output.setframerate(rate)
-        for frame in range(rate * 20):
+        for frame in range(rate * 40):
             sample = random.randint(-8000, 8000)
             output.writeframesraw(struct.pack("<hh", sample, sample))
 PY
@@ -244,6 +244,34 @@ esac
 record_monitor "$test_root/named-output.raw" 96000 shatter-test-headphones
 assert_audio_rms_at_least "$test_root/named-output.raw" 0.005 \
     "assigned app channel produced no audio at the named output sink"
+"$binary" set gain output "Headphone Monitor" -20
+output_listing=$("$binary" list out)
+case "$output_listing" in
+    *"Headphone Monitor"*"-20.0 dB"*) ;;
+    *) echo "output listing did not show the selected fader level: $output_listing" >&2; exit 1 ;;
+esac
+sleep 0.3
+record_monitor "$test_root/output-attenuated.raw" 96000 shatter-test-headphones
+attenuated_output_rms=$(audio_rms "$test_root/output-attenuated.raw")
+awk -v baseline="$(audio_rms "$test_root/named-output.raw")" -v attenuated="$attenuated_output_rms" \
+    'BEGIN { exit !(attenuated > baseline * 0.08 && attenuated < baseline * 0.12) }' || {
+    echo "output fader did not attenuate its mixed signal by 20 dB: baseline=$(audio_rms "$test_root/named-output.raw") attenuated=$attenuated_output_rms" >&2
+    exit 1
+}
+"$binary" set mute output "Headphone Monitor" on
+output_listing=$("$binary" list out)
+case "$output_listing" in
+    *"Headphone Monitor"*"yes"*) ;;
+    *) echo "output listing did not show the mute state: $output_listing" >&2; exit 1 ;;
+esac
+sleep 0.3
+record_monitor "$test_root/output-muted.raw" 96000 shatter-test-headphones
+if awk -v rms="$(audio_rms "$test_root/output-muted.raw")" 'BEGIN { exit !(rms > 0.001) }'; then
+    echo "muted output channel remained audible" >&2
+    exit 1
+fi
+"$binary" set mute output "Headphone Monitor" off
+"$binary" set gain output "Headphone Monitor" 0
 "$binary" assign stream "$stream_a_id" speakers
 "$binary" assign stream "$stream_a_id" "Headphone Monitor"
 sleep 0.3

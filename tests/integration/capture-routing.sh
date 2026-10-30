@@ -129,6 +129,15 @@ record_monitor "$test_root/send-off.raw"
 "$binary" assign capture capture speakers
 sleep 0.25
 record_monitor "$test_root/send-on.raw"
+"$binary" set mute capture capture on
+inputs=$("$binary" list in)
+case "$inputs" in
+    *"capture"*"yes"*) ;;
+    *) echo "input listing did not show capture mute state: $inputs" >&2; exit 1 ;;
+esac
+sleep 0.25
+record_monitor "$test_root/capture-muted.raw"
+"$binary" set mute capture capture off
 "$binary" assign capture capture "Capture Monitor"
 sleep 0.25
 record_monitor "$test_root/two-sends.raw"
@@ -143,7 +152,7 @@ record_monitor "$test_root/all-sends-off.raw"
 sleep 0.25
 record_monitor "$test_root/attenuated.raw"
 
-python3 - "$test_root/send-off.raw" "$test_root/send-on.raw" "$test_root/two-sends.raw" \
+python3 - "$test_root/send-off.raw" "$test_root/send-on.raw" "$test_root/capture-muted.raw" "$test_root/two-sends.raw" \
     "$test_root/named-send-only.raw" "$test_root/all-sends-off.raw" "$test_root/attenuated.raw" <<'PY'
 import math
 import struct
@@ -154,11 +163,13 @@ def rms(path):
     samples = struct.unpack("<%df" % (len(raw) // 4), raw)
     return math.sqrt(sum(sample * sample for sample in samples) / len(samples)) if samples else 0.0
 
-off, on, two_sends, named_only, all_off, attenuated = [rms(path) for path in sys.argv[1:]]
+off, on, muted, two_sends, named_only, all_off, attenuated = [rms(path) for path in sys.argv[1:]]
 if off > 0.001:
     raise SystemExit("capture speaker send was audible while disabled: rms=%s" % off)
 if on < 0.05:
     raise SystemExit("enabling capture speaker send produced no audible signal: rms=%s" % on)
+if muted > 0.001:
+    raise SystemExit("muted capture channel remained audible: rms=%s" % muted)
 if two_sends < on * 1.2:
     raise SystemExit("capture send to a second output did not add signal: one=%s two=%s" % (on, two_sends))
 if named_only < 0.05:
@@ -172,4 +183,4 @@ PY
 
 "$binary" stop
 engine_running=0
-echo "isolated capture source routing, default-off speaker send, and gain control passed"
+echo "isolated capture source routing, default-off speaker send, fader, and gain control passed"

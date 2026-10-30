@@ -233,6 +233,9 @@ bool PipeWireEngine::make_output_locked(std::string name, std::string& error)
         if (output.in_use) continue;
         output.engine = this;
         output.in_use = true;
+        output.target_gain.store(1.0F, std::memory_order_relaxed);
+        output.muted.store(false, std::memory_order_relaxed);
+        output.smoothed_gain = 1.0F;
         output.input_users.store(0, std::memory_order_release);
         output.assigned_sink_count = 0;
         for (auto& assigned_name : output.assigned_sink_names) assigned_name.clear();

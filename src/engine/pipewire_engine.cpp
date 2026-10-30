@@ -135,6 +135,9 @@ bool PipeWireEngine::start(std::string& error)
     speakers.in_use = true;
     speakers.name = "speakers";
     speakers.node_name = kSpeakerStreamName;
+    speakers.target_gain.store(1.0F, std::memory_order_relaxed);
+    speakers.muted.store(false, std::memory_order_relaxed);
+    speakers.smoothed_gain = 1.0F;
 
     pw_init(nullptr, nullptr);
     main_loop_ = pw_main_loop_new(nullptr);
@@ -313,6 +316,34 @@ bool PipeWireEngine::set_capture_gain_db(float decibels, std::string& error)
         return false;
     }
     capture_channel_.target_gain.store(std::pow(10.0F, decibels / 20.0F), std::memory_order_relaxed);
+    return true;
+}
+
+bool PipeWireEngine::set_capture_muted(bool muted, std::string&)
+{
+    capture_channel_.muted.store(muted, std::memory_order_release);
+    return true;
+}
+
+bool PipeWireEngine::set_output_gain_db(std::string_view output_selector, float decibels, std::string& error)
+{
+    if (!std::isfinite(decibels) || decibels < kMinimumGainDb || decibels > kMaximumGainDb) {
+        error = "gain must be between -60 dB and +12 dB";
+        return false;
+    }
+    std::lock_guard lock(nodes_mutex_);
+    OutputChannel* output = resolve_output_locked(output_selector, error);
+    if (output == nullptr) return false;
+    output->target_gain.store(std::pow(10.0F, decibels / 20.0F), std::memory_order_release);
+    return true;
+}
+
+bool PipeWireEngine::set_output_muted(std::string_view output_selector, bool muted, std::string& error)
+{
+    std::lock_guard lock(nodes_mutex_);
+    OutputChannel* output = resolve_output_locked(output_selector, error);
+    if (output == nullptr) return false;
+    output->muted.store(muted, std::memory_order_release);
     return true;
 }
 
@@ -506,7 +537,8 @@ std::string PipeWireEngine::list_outputs(std::size_t) const
                     (target->second.name.empty() ? target->second.description : target->second.name);
                 route = fit_column(sink_name, 20) + " (sink-" + std::to_string(sink_id) + ")";
             }
-            output_rows.push_back({output_name, node_id, output.node_name, route});
+            output_rows.push_back({output_name, node_id, output.node_name, format_gain(output.target_gain.load()),
+                output.muted.load() ? "yes" : "no", route});
             has_route = true;
         }
         if (!has_route && output.node_name == kSpeakerStreamName) {
@@ -516,15 +548,17 @@ std::string PipeWireEngine::list_outputs(std::size_t) const
                 if (target == nodes_.end()) continue;
                 const std::string& sink_name = target->second.name.empty() ? target->second.description : target->second.name;
                 output_rows.push_back({output_name, node_id, output.node_name,
+                    format_gain(output.target_gain.load()), output.muted.load() ? "yes" : "no",
                     fit_column(sink_name, 20) + " (sink-" + std::to_string(sink_id) + ")"});
                 has_route = true;
             }
         }
-        if (!has_route) output_rows.push_back({output_name, node_id, output.node_name, "not assigned"});
+        if (!has_route) output_rows.push_back({output_name, node_id, output.node_name,
+            format_gain(output.target_gain.load()), output.muted.load() ? "yes" : "no", "not assigned"});
     }
     if (output_rows.empty()) output_rows.push_back({"-", "-", "-", "No output channels"});
-    append_table(table, {"Output channel", "PipeWire node ID", "PipeWire node name", "Assigned playback sinks"},
-        output_rows, {24, 16, 28, 40});
+    append_table(table, {"Output channel", "PipeWire node ID", "PipeWire node name", "Gain", "Mute", "Assigned playback sinks"},
+        output_rows, {24, 16, 28, 8, 5, 40});
 
     std::vector<NodeInfo> playback_sinks;
     for (const auto& [id, node] : nodes_) {

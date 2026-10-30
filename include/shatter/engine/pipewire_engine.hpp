@@ -44,7 +44,10 @@ public:
     bool rename_stream(std::string_view current_name, std::string new_name, std::string& error);
     bool set_capture_source(std::uint32_t source_node_id, std::string& error);
     bool set_capture_gain_db(float decibels, std::string& error);
+    bool set_capture_muted(bool muted, std::string& error);
     bool set_capture_speaker_send(bool enabled, std::string& error);
+    bool set_output_gain_db(std::string_view output_selector, float decibels, std::string& error);
+    bool set_output_muted(std::string_view output_selector, bool muted, std::string& error);
     bool make_output(std::string name, std::string& error);
     bool delete_output(std::string_view selector, std::string& error);
     bool assign_output_sink(std::string_view output_selector, std::string_view sink_selector, bool assigned,
@@ -122,6 +125,9 @@ private:
         std::atomic<std::uint32_t> input_users{0};
         std::string name;
         std::string node_name;
+        std::atomic<float> target_gain{1.0F};
+        std::atomic<bool> muted{false};
+        float smoothed_gain = 1.0F;
         std::uint32_t node_id = PW_ID_ANY;
         std::array<std::uint32_t, 8> sink_node_ids{};
         std::size_t sink_count = 0;

@@ -4,7 +4,7 @@ A single-user Linux desktop mixer daemon for persistent application and device r
 
 ## Project status
 
-This repository is an early prototype. Shatter groups PipeWire playback streams into per-application channels and provides per-stream and per-channel gain and mute controls. App channels can be sent to named output channels, including the built-in `speakers` output, which follows the default playback sink. You can create additional outputs and route each one to a playback sink. Each output currently has one sink assignment. A selected PipeWire capture source can feed an independent microphone channel with its own gain and an optional speaker send.
+This repository is an early prototype. Shatter groups PipeWire playback streams into per-application channels and provides per-stream and per-channel gain and mute controls. App channels can be sent to named output channels, including the built-in `speakers` output, which follows the default playback sink. You can create additional outputs, route them to multiple playback sinks, and control each output's gain and mute independently. A selected PipeWire capture source feeds an independent capture channel with its own gain, mute, and optional sends.
 
 ## Architecture and domain
 
@@ -44,7 +44,10 @@ shatter list out
 shatter list all
 shatter set gain app Brave 0
 shatter set gain stream Brave-1 0
+shatter set gain output Headphones -3
 shatter set mute app Brave on
+shatter set mute capture capture on
+shatter set mute output Headphones off
 shatter rename app Brave Browser
 shatter rename stream Brave-1 "Browser music"
 shatter list in # choose a capture source node ID
@@ -67,4 +70,4 @@ The older dash-prefixed command forms remain accepted as compatibility aliases.
 
 Profiling requires the engine's PipeWire output to be ready. The stop command prints callback timing percentiles, callback budget overruns, process CPU time, dropped and unfilled ring-buffer frames, Shatter input ring occupancy, and PipeWire's reported device delay and queued audio. Unfilled ring frames can include idle or silent streams. Callback timing measures Shatter's processing work; ring occupancy, PipeWire delay, and queued audio are separate parts of the audio path, and this summary is not an end-to-end loopback latency measurement.
 
-The capture channel's speaker send starts off and resets to off whenever its source is changed or removed. The engine creates one virtual PipeWire ingress sink for each playback stream and returns streams to ordinary PipeWire routing when stopped. Its control socket lives in `$XDG_RUNTIME_DIR/shatter/control.sock` and is accessible only to the current user.
+Gain controls range from -60 dB to +12 dB and are smoothed during playback. The capture channel's speaker send starts off and resets to off whenever its source is changed or removed. The engine creates one virtual PipeWire ingress sink for each playback stream and returns streams to ordinary PipeWire routing when stopped. Its control socket lives in `$XDG_RUNTIME_DIR/shatter/control.sock` and is accessible only to the current user.

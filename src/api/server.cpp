@@ -355,7 +355,7 @@ int run_server()
                 float decibels = 0.0F;
                 std::string extra;
                 if (!(parsed >> action >> scope >> std::quoted(identifier) >> decibels) || (parsed >> extra)) {
-                    reply = "ERR expected GAIN <app|stream> <name-or-id> <decibels>\n";
+                    reply = "ERR expected GAIN <app|stream|output> <name-or-id> <decibels>\n";
                 } else if (scope == "APP") {
                     std::string gain_error;
                     if (audio_engine.set_app_gain_db(identifier, decibels, gain_error)) {
@@ -370,8 +370,15 @@ int run_server()
                     } else {
                         reply = "ERR " + gain_error + "\n";
                     }
+                } else if (scope == "OUTPUT") {
+                    std::string gain_error;
+                    if (audio_engine.set_output_gain_db(identifier, decibels, gain_error)) {
+                        reply = "OK output channel " + identifier + " gain set to " + std::to_string(decibels) + " dB\n";
+                    } else {
+                        reply = "ERR " + gain_error + "\n";
+                    }
                 } else {
-                    reply = "ERR gain scope must be app or stream\n";
+                    reply = "ERR gain scope must be app, stream, or output\n";
                 }
             } else if (input.starts_with("MUTE ")) {
                 std::istringstream parsed{std::string(input)};
@@ -383,7 +390,7 @@ int run_server()
                 bool muted = false;
                 if (!(parsed >> action >> scope >> std::quoted(identifier) >> value) || (parsed >> extra) ||
                     (value != "on" && value != "off")) {
-                    reply = "ERR expected MUTE <app|stream> <id> <on|off>\n";
+                    reply = "ERR expected MUTE <app|stream|capture|output> <id> <on|off>\n";
                 } else if (scope == "APP") {
                     std::string mute_error;
                     muted = value == "on";
@@ -400,8 +407,26 @@ int run_server()
                     } else {
                         reply = "ERR " + mute_error + "\n";
                     }
+                } else if (scope == "CAPTURE") {
+                    std::string mute_error;
+                    muted = value == "on";
+                    if (identifier != "capture") {
+                        reply = "ERR capture input selector must be 'capture'\n";
+                    } else if (audio_engine.set_capture_muted(muted, mute_error)) {
+                        reply = std::string("OK capture channel ") + (muted ? "muted\n" : "unmuted\n");
+                    } else {
+                        reply = "ERR " + mute_error + "\n";
+                    }
+                } else if (scope == "OUTPUT") {
+                    std::string mute_error;
+                    muted = value == "on";
+                    if (audio_engine.set_output_muted(identifier, muted, mute_error)) {
+                        reply = "OK output channel " + identifier + (muted ? " muted\n" : " unmuted\n");
+                    } else {
+                        reply = "ERR " + mute_error + "\n";
+                    }
                 } else {
-                    reply = "ERR mute scope must be app or stream\n";
+                    reply = "ERR mute scope must be app, stream, capture, or output\n";
                 }
             }
         }

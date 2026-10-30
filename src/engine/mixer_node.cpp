@@ -284,6 +284,18 @@ void PipeWireEngine::output_process(OutputChannel& output)
                 }
             }
 
+            const float output_target = output.muted.load(std::memory_order_relaxed)
+                ? 0.0F : output.target_gain.load(std::memory_order_relaxed);
+            float output_gain = output.smoothed_gain;
+            const float output_increment = frames == 0 ? 0.0F
+                : (output_target - output_gain) / static_cast<float>(frames);
+            for (std::size_t frame = 0; frame < frames; ++frame) {
+                samples[frame * kChannels] *= output_gain;
+                samples[frame * kChannels + 1] *= output_gain;
+                output_gain += output_increment;
+            }
+            output.smoothed_gain = output_target;
+
             if (shutdown_fade_requested_.load(std::memory_order_acquire)) {
                 if (output.shutdown_fade_frames_remaining == 0 && output.shutdown_fade_gain > 0.0F)
                     output.shutdown_fade_frames_remaining = kShutdownFadeFrames;

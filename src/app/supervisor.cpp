@@ -34,10 +34,10 @@ constexpr std::string_view kUsage =
     "       shatter status [engine]\n"
     "       shatter stop [engine|profile]\n"
     "       shatter list <in|out|all>\n"
-    "       shatter set gain <app|stream> <name-or-id> <decibels>\n"
+    "       shatter set gain <app|stream|output> <name-or-id> <decibels>\n"
     "       shatter set gain capture <decibels>\n"
     "       shatter set default show <name>\n"
-    "       shatter set mute <app|stream> <name-or-id> <on|off>\n"
+    "       shatter set mute <app|stream|capture|output> <name-or-id> <on|off>\n"
     "       shatter set capture <source|send> <value>\n"
     "       shatter rename <app|stream> <old-name> <new-name>\n"
     "       shatter make out <name>\n"
@@ -171,21 +171,21 @@ int run_cli(int argc, char** argv)
     } else if (arg(1) == "set" && arg(2) == "gain" && arg(3) == "capture" && argc == 5) {
         normalized.emplace_back("--set-capture-gain");
         normalized.emplace_back(argv[4]);
-    } else if (arg(1) == "set" && arg(2) == "default" && arg(3) == "show" && argc == 5) {
-        normalized.emplace_back("--set-default-show");
-        normalized.emplace_back(argv[4]);
-    } else if (arg(1) == "set" && arg(2) == "gain" && argc == 6) {
-        if (arg(3) == "app" || arg(3) == "stream") {
-            normalized.emplace_back("--set-gain");
-            normalized.emplace_back(argv[3]);
-            normalized.emplace_back(argv[4]);
-            normalized.emplace_back(argv[5]);
-        }
     } else if (arg(1) == "set" && arg(2) == "mute" && argc == 6) {
         normalized.emplace_back("--set-mute");
         normalized.emplace_back(argv[3]);
         normalized.emplace_back(argv[4]);
         normalized.emplace_back(argv[5]);
+    } else if (arg(1) == "set" && arg(2) == "default" && arg(3) == "show" && argc == 5) {
+        normalized.emplace_back("--set-default-show");
+        normalized.emplace_back(argv[4]);
+    } else if (arg(1) == "set" && arg(2) == "gain" && argc == 6) {
+        if (arg(3) == "app" || arg(3) == "stream" || arg(3) == "output") {
+            normalized.emplace_back("--set-gain");
+            normalized.emplace_back(argv[3]);
+            normalized.emplace_back(argv[4]);
+            normalized.emplace_back(argv[5]);
+        }
     } else if (arg(1) == "set" && arg(2) == "capture" && argc == 5) {
         if (arg(3) == "source") {
             normalized.emplace_back("--set-capture-source");
@@ -327,8 +327,8 @@ int run_cli(int argc, char** argv)
 
         if (argc == 5 && std::string_view(argv[1]) == "--set-gain") {
             const std::string_view scope(argv[2]);
-            if (scope != "app" && scope != "stream") {
-                std::cerr << "Gain scope must be app or stream.\n";
+            if (scope != "app" && scope != "stream" && scope != "output") {
+                std::cerr << "Gain scope must be app, stream, or output.\n";
                 return 2;
             }
             float decibels = 0.0F;
@@ -339,7 +339,7 @@ int run_cli(int argc, char** argv)
                 return 2;
             }
             std::ostringstream command_builder;
-            command_builder << "GAIN " << (scope == "app" ? "APP " : "STREAM ")
+            command_builder << "GAIN " << (scope == "app" ? "APP " : scope == "stream" ? "STREAM " : "OUTPUT ")
                             << std::quoted(argv[3]) << ' ' << std::to_string(decibels);
             const std::string command = command_builder.str();
             const std::string response = shatter::api::request(command);
@@ -358,12 +358,14 @@ int run_cli(int argc, char** argv)
         if (argc == 5 && std::string_view(argv[1]) == "--set-mute") {
             const std::string_view scope(argv[2]);
             const std::string_view value(argv[4]);
-            if ((scope != "app" && scope != "stream") || (value != "on" && value != "off")) {
-                std::cerr << "Usage: shatter --set-mute <app|stream> <id> <on|off>\n";
+            if ((scope != "app" && scope != "stream" && scope != "capture" && scope != "output") ||
+                (value != "on" && value != "off")) {
+                std::cerr << "Usage: shatter --set-mute <app|stream|capture|output> <id> <on|off>\n";
                 return 2;
             }
             std::ostringstream command_builder;
-            command_builder << "MUTE " << (scope == "app" ? "APP " : "STREAM ")
+            command_builder << "MUTE " << (scope == "app" ? "APP " : scope == "stream" ? "STREAM " :
+                                            scope == "capture" ? "CAPTURE " : "OUTPUT ")
                             << std::quoted(argv[3]) << ' ' << value;
             const std::string command = command_builder.str();
             const std::string response = shatter::api::request(command);
