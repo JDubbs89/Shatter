@@ -153,8 +153,9 @@ int run_server()
     shatter::engine::PipeWireEngine audio_engine;
     std::string audio_error;
     audio_engine.start(audio_error);
+    std::string startup_show = "default";
     std::string default_config_error;
-    audio_engine.load_config("default", default_config_error);
+    const bool startup_show_loaded = audio_engine.load_default_config(startup_show, default_config_error);
 
     const int server_fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (server_fd < 0) {
@@ -203,9 +204,11 @@ int run_server()
                 }
             } else if (input == "STOP") {
                 std::string save_error;
-                if (!audio_engine.save_config("default", save_error)) {
-                    reply = "ERR could not save default configuration: " + save_error + "\n";
-                } else reply = "OK stopping\n";
+                if (!startup_show_loaded)
+                    reply = "OK stopping\n";
+                else if (!audio_engine.save_config(startup_show, save_error))
+                    reply = "ERR could not save default show '" + startup_show + "': " + save_error + "\n";
+                else reply = "OK stopping\n";
                 running = false;
             } else if (input.starts_with("CONFIG-SAVE ") || input.starts_with("CONFIG-LOAD ")) {
                 std::istringstream parsed{std::string(input)};

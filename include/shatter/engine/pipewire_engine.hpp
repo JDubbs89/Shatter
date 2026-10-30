@@ -55,6 +55,7 @@ public:
                              std::string_view output_selector, bool assigned, std::string& error);
     bool load_config(std::string_view name, std::string& error);
     bool save_config(std::string_view name, std::string& error);
+    bool load_default_config(std::string& name, std::string& error);
     std::string list_inputs(std::size_t terminal_width = 100) const;
     std::string list_outputs(std::size_t terminal_width = 100) const;
     bool profile_start(std::string& error);

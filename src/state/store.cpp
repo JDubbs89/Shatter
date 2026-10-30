@@ -46,6 +46,82 @@ std::filesystem::path Store::config_path(std::string_view name) const
     return directory / (filename + ".conf");
 }
 
+std::filesystem::path Store::default_show_path() const
+{
+    return config_path("default").parent_path() / "default-show";
+}
+
+bool Store::has_show(std::string_view name) const
+{
+    try {
+        return std::filesystem::is_regular_file(config_path(name));
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
+bool Store::default_show(std::string& name, std::string& error) const
+{
+    try {
+        const auto path = default_show_path();
+        std::ifstream file(path);
+        if (!file) {
+            if (!std::filesystem::exists(path)) {
+                name = "default";
+                return true;
+            }
+            error = "cannot read default show selection";
+            return false;
+        }
+        std::string selected;
+        std::string extra;
+        if (!std::getline(file, selected) || selected.empty() || std::getline(file, extra)) {
+            error = "invalid default show selection";
+            return false;
+        }
+        const auto selected_path = config_path(selected);
+        if (!std::filesystem::is_regular_file(selected_path)) {
+            error = "default show configuration not found: " + selected;
+            return false;
+        }
+        name = std::move(selected);
+        return true;
+    } catch (const std::exception& exception) {
+        error = exception.what();
+        return false;
+    }
+}
+
+bool Store::set_default_show(std::string_view name, std::string& error) const
+{
+    try {
+        const auto show_path = config_path(name);
+        if (!std::filesystem::is_regular_file(show_path)) {
+            error = "configuration not found: " + std::string(name);
+            return false;
+        }
+        const auto path = default_show_path();
+        std::filesystem::create_directories(path.parent_path());
+        const auto temporary_path = path.string() + ".tmp";
+        std::ofstream file(temporary_path, std::ios::trunc);
+        if (!file) {
+            error = "cannot write default show selection";
+            return false;
+        }
+        file << name << '\n';
+        file.close();
+        if (!file) {
+            error = "failed while writing default show selection";
+            return false;
+        }
+        std::filesystem::rename(temporary_path, path);
+        return true;
+    } catch (const std::exception& exception) {
+        error = exception.what();
+        return false;
+    }
+}
+
 bool Store::load(std::string_view name, Show& show, std::string& error) const
 {
     try {

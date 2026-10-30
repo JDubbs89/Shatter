@@ -382,6 +382,18 @@ bool PipeWireEngine::load_config(std::string_view name, std::string& error)
     return true;
 }
 
+bool PipeWireEngine::load_default_config(std::string& name, std::string& error)
+{
+    std::string selected;
+    if (!state_store_.default_show(selected, error)) return false;
+    if (!load_config(selected, error)) {
+        if (selected != "default" || state_store_.has_show(selected)) return false;
+        error.clear();
+    }
+    name = std::move(selected);
+    return true;
+}
+
 std::string PipeWireEngine::list_inputs(std::size_t) const
 {
     std::lock_guard lock(nodes_mutex_);

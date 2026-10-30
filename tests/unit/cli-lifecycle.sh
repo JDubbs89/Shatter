@@ -6,6 +6,7 @@ runtime_dir=$(mktemp -d)
 chmod 700 "$runtime_dir"
 trap '"$binary" stop >/dev/null 2>&1 || true; rm -rf "$runtime_dir"' EXIT HUP INT TERM
 export XDG_RUNTIME_DIR="$runtime_dir"
+export XDG_CONFIG_HOME="$runtime_dir/config"
 
 stopped=$($binary status)
 case "$stopped" in
@@ -53,10 +54,27 @@ if $binary --set-mute app app-deadbeef on >/dev/null 2>&1; then
     exit 1
 fi
 
-$binary start
+$binary save show studio
+$binary set default show studio
+if [ "$(cat "$XDG_CONFIG_HOME/shatter/default-show")" != "studio" ]; then
+    echo "default show selection was not persisted" >&2
+    exit 1
+fi
+if $binary set default show missing >/dev/null 2>&1; then
+    echo "expected selecting a missing show to fail" >&2
+    exit 1
+fi
+
 $binary stop
 stopped=$($binary status)
 case "$stopped" in
     *"is stopped"*) ;;
     *) echo "expected stopped status after stop, got: $stopped" >&2; exit 1 ;;
 esac
+
+$binary start
+$binary stop
+if [ ! -f "$XDG_CONFIG_HOME/shatter/studio.conf" ]; then
+    echo "engine did not save the selected default show at stop" >&2
+    exit 1
+fi

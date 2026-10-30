@@ -10,6 +10,7 @@ Shatter currently mixes every input into one PipeWire playback stream routed to 
 - `shatter unassign out <output-selector> <sink-selector>` removes that route.
 - `shatter assign <app|capture|stream> <input-selector> <output-selector>` creates a send from an input channel to an output channel.
 - `shatter unassign <app|capture|stream> <input-selector> <output-selector>` removes that send.
+- `shatter set default show <name>` selects the named show to load when the engine starts.
 
 Sink selectors include PipeWire node IDs and Shatter-generated IDs shown by output listing. Output selectors include the Shatter name and PipeWire node ID. Names and IDs must resolve unambiguously.
 

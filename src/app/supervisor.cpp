@@ -1,5 +1,6 @@
 #include "shatter/app/supervisor.hpp"
 #include "shatter/api/server.hpp"
+#include "shatter/state/store.hpp"
 
 #include <array>
 #include <cerrno>
@@ -34,6 +35,7 @@ constexpr std::string_view kUsage =
     "       shatter list <in|out|all>\n"
     "       shatter set gain <app|stream> <name-or-id> <decibels>\n"
     "       shatter set gain capture <decibels>\n"
+    "       shatter set default show <name>\n"
     "       shatter set mute <app|stream> <name-or-id> <on|off>\n"
     "       shatter set capture <source|send> <value>\n"
     "       shatter rename <app|stream> <old-name> <new-name>\n"
@@ -147,6 +149,9 @@ int run_cli(int argc, char** argv)
     } else if (arg(1) == "set" && arg(2) == "gain" && arg(3) == "capture" && argc == 5) {
         normalized.emplace_back("--set-capture-gain");
         normalized.emplace_back(argv[4]);
+    } else if (arg(1) == "set" && arg(2) == "default" && arg(3) == "show" && argc == 5) {
+        normalized.emplace_back("--set-default-show");
+        normalized.emplace_back(argv[4]);
     } else if (arg(1) == "set" && arg(2) == "gain" && argc == 6) {
         if (arg(3) == "app" || arg(3) == "stream") {
             normalized.emplace_back("--set-gain");
@@ -204,6 +209,16 @@ int run_cli(int argc, char** argv)
     }
 
     try {
+        if (argc == 3 && std::string_view(argv[1]) == "--set-default-show") {
+            shatter::state::Store store;
+            std::string error;
+            if (!store.set_default_show(argv[2], error)) {
+                std::cerr << "Could not set default show: " << error << '\n';
+                return 1;
+            }
+            std::cout << "Default show set to '" << argv[2] << "' for the next engine start.\n";
+            return 0;
+        }
         if (argc == 3 && (std::string_view(argv[1]) == "--make-out" ||
                           std::string_view(argv[1]) == "--delete-out")) {
             std::ostringstream command;

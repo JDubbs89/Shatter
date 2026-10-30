@@ -34,9 +34,13 @@ public:
 
     bool load(std::string_view name, Show& show, std::string& error) const;
     bool save(std::string_view name, const Show& show, std::string& error) const;
+    bool has_show(std::string_view name) const;
+    bool default_show(std::string& name, std::string& error) const;
+    bool set_default_show(std::string_view name, std::string& error) const;
 
 private:
     std::filesystem::path config_path(std::string_view name) const;
+    std::filesystem::path default_show_path() const;
 
     std::filesystem::path directory_;
 };
