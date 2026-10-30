@@ -5,6 +5,8 @@ The product needs real channel-to-bus and matrix mixing in its first useful rele
 
 ## Prototype topology clarification
 
-The single custom realtime mixer remains the audio summing and output engine. For application playback, Shatter creates one PipeWire ingress sink per playback stream so the engine can retain stream identity and apply stream-level gain or mute before summing. Streams with the same application identity belong to one persistent app channel; the mixer applies app-channel gain or mute after their streams are summed. These ingress sinks are graph endpoints, not independent mixers. The engine's speaker output feeds the selected PipeWire sink.
+The daemon uses one realtime mixer engine. For application playback, Shatter creates one PipeWire ingress sink per playback stream so the engine can retain stream identity and apply stream-level gain or mute before summing. Streams with the same application identity belong to one persistent app channel; the mixer applies app-channel gain or mute after their streams are summed. These ingress sinks are graph endpoints, not independent mixers.
+
+The engine exposes named output channels as PipeWire playback streams. The built-in `speakers` output follows the system's default playback sink and preserves the startup route. Users can create additional output channels, route each to one physical sink, and assign app channels to those outputs. Input fan-out uses a separate preallocated ring per output so concurrent output callbacks do not consume one another's audio. Output creation, routing, and deletion run on the PipeWire control loop; realtime callbacks only mix the prepared buffers. Multi-sink routing and sends from stream and capture inputs remain follow-up work.
 
 When Shatter exits, its stream ingress nodes are destroyed and WirePlumber restores ordinary routing. This keeps the fail-open behavior in the original decision while allowing per-stream controls.

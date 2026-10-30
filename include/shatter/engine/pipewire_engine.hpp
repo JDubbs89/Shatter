@@ -8,8 +8,8 @@
 
 #include <array>
 #include <atomic>
-#include <chrono>
 #include <condition_variable>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
@@ -24,6 +24,7 @@ class PipeWireEngine {
 public:
     static constexpr std::size_t max_app_channels = 1024;
     static constexpr std::size_t max_playback_streams = 128;
+    static constexpr std::size_t max_output_channels = 8;
 
     PipeWireEngine() = default;
     ~PipeWireEngine();
@@ -42,10 +43,16 @@ public:
     bool set_capture_source(std::uint32_t source_node_id, std::string& error);
     bool set_capture_gain_db(float decibels, std::string& error);
     bool set_capture_speaker_send(bool enabled, std::string& error);
+    bool make_output(std::string name, std::string& error);
+    bool delete_output(std::string_view selector, std::string& error);
+    bool assign_output_sink(std::string_view output_selector, std::string_view sink_selector, bool assigned,
+                            std::string& error);
+    bool assign_app_output(std::string_view app_selector, std::string_view output_selector, bool assigned,
+                           std::string& error);
     bool load_config(std::string_view name, std::string& error);
     bool save_config(std::string_view name, std::string& error);
     std::string list_inputs(std::size_t terminal_width = 100) const;
-    std::string list_outputs() const;
+    std::string list_outputs(std::size_t terminal_width = 100) const;
     bool profile_start(std::string& error);
     std::string profile_stop(std::string& error);
     bool available() const noexcept;
@@ -58,7 +65,8 @@ private:
         std::string name;
         std::atomic<float> target_gain{1.0F};
         std::atomic<bool> muted{false};
-        float smoothed_gain = 1.0F;
+        std::atomic<std::uint32_t> output_mask{1};
+        std::array<float, max_output_channels> smoothed_gain{};
     };
 
     struct PlaybackStream {
@@ -78,7 +86,7 @@ private:
         std::atomic<float> target_gain{1.0F};
         std::atomic<bool> muted{false};
         float smoothed_gain = 1.0F;
-        AudioRingBuffer audio;
+        std::array<AudioRingBuffer, max_output_channels> audio;
     };
 
     struct CaptureChannel {
@@ -90,9 +98,25 @@ private:
         std::atomic<std::uint32_t> mixer_users{0};
         std::atomic<float> target_gain{1.0F};
         std::atomic<bool> muted{false};
-        std::atomic<bool> speaker_send_enabled{false};
+        std::atomic<std::uint32_t> output_mask{0};
         float smoothed_gain = 1.0F;
-        AudioRingBuffer audio;
+        std::array<AudioRingBuffer, max_output_channels> audio;
+    };
+
+    struct OutputChannel {
+        PipeWireEngine* engine = nullptr;
+        bool in_use = false;
+        std::atomic<bool> active{false};
+        std::atomic<bool> linked{false};
+        std::atomic<std::uint32_t> mixer_users{0};
+        std::atomic<std::uint32_t> input_users{0};
+        std::string name;
+        std::string node_name;
+        std::uint32_t node_id = PW_ID_ANY;
+        std::atomic<std::uint32_t> sink_node_id{PW_ID_ANY};
+        pw_stream* stream = nullptr;
+        spa_hook listener{};
+        pw_stream_events events{};
     };
 
     struct CaptureSourceRequest {
@@ -100,6 +124,18 @@ private:
         std::uint32_t source_node_id = PW_ID_ANY;
         bool succeeded = false;
         std::string error;
+    };
+    struct OutputRequest {
+        PipeWireEngine* engine = nullptr;
+        enum class Action { make, remove, assign_sink, assign_app } action = Action::make;
+        std::string first;
+        std::string second;
+        bool assigned = false;
+        bool succeeded = false;
+        bool completed = false;
+        std::string error;
+        std::mutex completion_mutex;
+        std::condition_variable completion_cv;
     };
     struct SavedApp { std::string identity, name; float gain_db = 0.0F; bool muted = false; };
     struct SavedStream { std::string app_identity, original_name, name; float gain_db = 0.0F; bool muted = false; };
@@ -135,15 +171,27 @@ private:
     static void on_capture_source_process(void* data);
     static int on_capture_source_request(spa_loop* loop, bool async, std::uint32_t sequence,
                                          const void* data, std::size_t size, void* user_data);
+    static int on_output_request(spa_loop* loop, bool async, std::uint32_t sequence,
+                                 const void* data, std::size_t size, void* user_data);
     static void on_global(void* data, std::uint32_t id, std::uint32_t permissions,
                           const char* type, std::uint32_t version, const spa_dict* props);
     static void on_global_remove(void* data, std::uint32_t id);
 
     void stream_input_process(PlaybackStream& stream);
     void capture_source_process();
-    void output_process();
+    void output_process(OutputChannel& output);
     void update_playback_stream_state(PlaybackStream& stream, pw_stream_state state, const char* error);
     void refresh_output_link_locked();
+    bool invoke_output_request(OutputRequest& request, std::string& error);
+    bool make_output_locked(std::string name, std::string& error);
+    bool delete_output_locked(std::string_view selector, std::string& error);
+    bool assign_output_sink_locked(std::string_view output_selector, std::string_view sink_selector,
+                                   bool assigned, std::string& error);
+    bool assign_app_output_locked(std::string_view app_selector, std::string_view output_selector,
+                                  bool assigned, std::string& error);
+    OutputChannel* resolve_output_locked(std::string_view selector, std::string& error);
+    bool create_output_stream(OutputChannel& output, bool autoconnect, std::string& error);
+    void destroy_output_stream(OutputChannel& output);
     void handle_playback_node(std::uint32_t node_id, NodeInfo node);
     void create_stream_sink(PlaybackStream& stream);
     bool replace_capture_source(std::uint32_t source_node_id, std::string& error);
@@ -162,11 +210,8 @@ private:
     pw_core* core_ = nullptr;
     pw_registry* registry_ = nullptr;
     pw_metadata* default_metadata_ = nullptr;
-    pw_stream* speaker_output_ = nullptr;
     spa_hook registry_listener_{};
-    spa_hook output_listener_{};
     pw_registry_events registry_events_{};
-    pw_stream_events output_events_{};
     std::thread loop_thread_;
     mutable std::mutex state_mutex_;
     std::condition_variable state_changed_;
@@ -180,6 +225,7 @@ private:
     std::unordered_map<std::uint32_t, std::size_t> stream_by_node_;
     std::array<AppChannel, max_app_channels> app_channels_{};
     std::array<PlaybackStream, max_playback_streams> playback_streams_{};
+    std::array<OutputChannel, max_output_channels> output_channels_{};
     std::vector<SavedApp> saved_apps_;
     std::vector<SavedStream> saved_streams_;
     CaptureChannel capture_channel_{};

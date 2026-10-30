@@ -22,6 +22,8 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <fcntl.h>
+#include <unistd.h>
 
 namespace shatter::engine {
 namespace {
@@ -69,6 +71,18 @@ std::filesystem::path config_path(std::string_view name)
     return root / "shatter" / (filename + ".conf");
 }
 
+void trace_output(const char* stage, const void* request, std::string_view detail = {})
+{
+    if (std::getenv("SHATTER_TRACE_OUTPUT") == nullptr) return;
+    const char* path = std::getenv("SHATTER_TRACE_OUTPUT_FILE");
+    if (path == nullptr || *path == '\0') path = "/tmp/shatter-output-trace.log";
+    const int fd = ::open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
+    if (fd < 0) return;
+    dprintf(fd, "[output-trace] pid=%ld request=%p stage=%s detail=%.*s\n", static_cast<long>(getpid()),
+            request, stage, static_cast<int>(detail.size()), detail.data());
+    ::close(fd);
+}
+
 float gain_db(float linear)
 {
     return linear <= 0.0F ? -60.0F : std::max(-60.0F, 20.0F * std::log10(linear));
@@ -99,6 +113,12 @@ bool PipeWireEngine::start(std::string& error)
         return true;
     }
 
+    OutputChannel& speakers = output_channels_[0];
+    speakers.engine = this;
+    speakers.in_use = true;
+    speakers.name = "speakers";
+    speakers.node_name = kSpeakerStreamName;
+
     pw_init(nullptr, nullptr);
     main_loop_ = pw_main_loop_new(nullptr);
     if (main_loop_ == nullptr) {
@@ -126,34 +146,8 @@ bool PipeWireEngine::start(std::string& error)
     registry_events_.global_remove = &PipeWireEngine::on_global_remove;
     pw_registry_add_listener(registry_, &registry_listener_, &registry_events_, this);
 
-    output_events_.version = PW_VERSION_STREAM_EVENTS;
-    output_events_.state_changed = &PipeWireEngine::on_output_state_changed;
-    output_events_.process = &PipeWireEngine::on_output_process;
-    speaker_output_ = pw_stream_new(core_, "Shatter Speakers",
-        pw_properties_new(PW_KEY_MEDIA_TYPE, "Audio",
-                         PW_KEY_MEDIA_CATEGORY, "Playback",
-                         PW_KEY_MEDIA_ROLE, "Production",
-                         PW_KEY_MEDIA_CLASS, "Stream/Output/Audio",
-                         PW_KEY_NODE_NAME, kSpeakerStreamName,
-                         PW_KEY_NODE_DESCRIPTION, "Shatter Speakers",
-                         nullptr));
-    if (speaker_output_ == nullptr) {
-        error = "could not create the speaker output stream";
-        cleanup();
-        return false;
-    }
-    pw_stream_add_listener(speaker_output_, &output_listener_, &output_events_, this);
-
-    std::array<std::uint8_t, 1024> format_storage{};
-    spa_pod_builder builder = SPA_POD_BUILDER_INIT(format_storage.data(), format_storage.size());
-    const spa_pod* params[] = {build_stereo_format(&builder)};
-    const auto result = pw_stream_connect(
-        speaker_output_, PW_DIRECTION_OUTPUT, PW_ID_ANY,
-        static_cast<pw_stream_flags>(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS |
-                                     PW_STREAM_FLAG_RT_PROCESS),
-        params, 1);
-    if (result < 0) {
-        error = "could not connect the speaker output to PipeWire";
+    if (!create_output_stream(speakers, true, error)) {
+        if (error.empty()) error = "could not create the speaker output stream";
         cleanup();
         return false;
     }
@@ -295,6 +289,316 @@ bool PipeWireEngine::set_capture_source(std::uint32_t source_node_id, std::strin
     return request.succeeded;
 }
 
+bool PipeWireEngine::make_output(std::string name, std::string& error)
+{
+    OutputRequest request{};
+    request.engine = this;
+    request.action = OutputRequest::Action::make;
+    request.first = std::move(name);
+    return invoke_output_request(request, error);
+}
+
+bool PipeWireEngine::delete_output(std::string_view selector, std::string& error)
+{
+    trace_output("delete.enter", this, selector);
+    OutputRequest request{};
+    request.engine = this;
+    request.action = OutputRequest::Action::remove;
+    request.first = std::string(selector);
+    return invoke_output_request(request, error);
+}
+
+bool PipeWireEngine::assign_output_sink(std::string_view output_selector, std::string_view sink_selector,
+                                        bool assigned, std::string& error)
+{
+    OutputRequest request{};
+    request.engine = this;
+    request.action = OutputRequest::Action::assign_sink;
+    request.first = std::string(output_selector);
+    request.second = std::string(sink_selector);
+    request.assigned = assigned;
+    return invoke_output_request(request, error);
+}
+
+bool PipeWireEngine::assign_app_output(std::string_view app_selector, std::string_view output_selector,
+                                       bool assigned, std::string& error)
+{
+    OutputRequest request{};
+    request.engine = this;
+    request.action = OutputRequest::Action::assign_app;
+    request.first = std::string(app_selector);
+    request.second = std::string(output_selector);
+    request.assigned = assigned;
+    return invoke_output_request(request, error);
+}
+
+bool PipeWireEngine::invoke_output_request(OutputRequest& request, std::string& error)
+{
+    if (main_loop_ == nullptr) { error = "PipeWire engine is not running"; return false; }
+    const int result = pw_loop_invoke(pw_main_loop_get_loop(main_loop_), &PipeWireEngine::on_output_request,
+                                      0, nullptr, 0, true, &request);
+    if (result < 0) {
+        error = "could not schedule the output operation on the PipeWire loop";
+        return false;
+    }
+    {
+        std::unique_lock lock(request.completion_mutex);
+        request.completion_cv.wait(lock, [&request] { return request.completed; });
+    }
+    error = std::move(request.error);
+    if (!request.succeeded && error.empty()) {
+        switch (request.action) {
+        case OutputRequest::Action::make: error = "PipeWire could not create the output channel"; break;
+        case OutputRequest::Action::remove: error = "PipeWire could not delete the output channel"; break;
+        case OutputRequest::Action::assign_sink: error = "PipeWire could not update the output sink route"; break;
+        case OutputRequest::Action::assign_app: error = "PipeWire could not update the app channel's output sends"; break;
+        }
+    }
+    trace_output("operation.invoke-return", &request,
+                 "action=" + std::to_string(static_cast<int>(request.action)) +
+                 " result=" + std::to_string(result) + " succeeded=" + std::to_string(request.succeeded) +
+                 " error=" + error);
+    return request.succeeded;
+}
+
+int PipeWireEngine::on_output_request(spa_loop*, bool, std::uint32_t, const void*, std::size_t, void* user_data)
+{
+    auto& request = *static_cast<OutputRequest*>(user_data);
+    auto& engine = *request.engine;
+    trace_output("loop.callback-enter", &request,
+                 "action=" + std::to_string(static_cast<int>(request.action)) + " first=" + request.first);
+    switch (request.action) {
+    case OutputRequest::Action::make:
+        request.succeeded = engine.make_output_locked(std::move(request.first), request.error);
+        break;
+    case OutputRequest::Action::remove:
+        request.succeeded = engine.delete_output_locked(request.first, request.error);
+        break;
+    case OutputRequest::Action::assign_sink: {
+        std::lock_guard lock(engine.nodes_mutex_);
+        request.succeeded = engine.assign_output_sink_locked(request.first, request.second,
+                                                              request.assigned, request.error);
+        break;
+    }
+    case OutputRequest::Action::assign_app: {
+        std::lock_guard lock(engine.nodes_mutex_);
+        request.succeeded = engine.assign_app_output_locked(request.first, request.second,
+                                                             request.assigned, request.error);
+        break;
+    }
+    }
+    trace_output("loop.callback-exit", &request,
+                 "action=" + std::to_string(static_cast<int>(request.action)) +
+                 " succeeded=" + std::to_string(request.succeeded) + " error=" + request.error);
+    {
+        std::lock_guard lock(request.completion_mutex);
+        request.completed = true;
+    }
+    request.completion_cv.notify_one();
+    return 0;
+}
+
+bool PipeWireEngine::make_output_locked(std::string name, std::string& error)
+{
+    if (name.empty() || name.size() > 128 || name.find_first_of("\r\n") != std::string::npos ||
+        name.find('\0') != std::string::npos) {
+        error = "output name must be 1 to 128 characters and cannot contain line breaks";
+        return false;
+    }
+    std::uint32_t numeric_selector = 0;
+    const auto [numeric_end, numeric_error] = std::from_chars(name.data(), name.data() + name.size(), numeric_selector);
+    if ((numeric_error == std::errc{} && numeric_end == name.data() + name.size()) ||
+        name == kSpeakerStreamName ||
+        name.starts_with("shatter.output.")) {
+        error = "output name cannot look like a PipeWire node ID or generated output node name";
+        return false;
+    }
+    std::unique_lock lock(nodes_mutex_);
+    for (const auto& output : output_channels_) {
+        if (output.in_use && output.name == name) { error = "an output channel already uses the name: " + name; return false; }
+    }
+    for (std::size_t index = 1; index < output_channels_.size(); ++index) {
+        OutputChannel& output = output_channels_[index];
+        if (output.in_use) continue;
+        output.engine = this;
+        output.in_use = true;
+        output.input_users.store(0, std::memory_order_release);
+        output.name = std::move(name);
+        output.node_name = "shatter.output." + std::to_string(index);
+        lock.unlock();
+        if (!create_output_stream(output, false, error)) {
+            lock.lock();
+            output.in_use = false;
+            output.name.clear();
+            output.node_name.clear();
+            return false;
+        }
+        return true;
+    }
+    error = "Shatter reached its output channel limit";
+    return false;
+}
+
+bool PipeWireEngine::delete_output_locked(std::string_view selector, std::string& error)
+{
+    trace_output("delete.locked-enter", this, selector);
+    std::unique_lock lock(nodes_mutex_);
+    OutputChannel* output = resolve_output_locked(selector, error);
+    trace_output("delete.resolved", output,
+                 "selector=" + std::string(selector) + " error=" + error +
+                 " channel=" + (output ? output->name : "<null>"));
+    if (output == nullptr) return false;
+    if (output == &output_channels_[0]) { error = "the built-in speakers output cannot be deleted"; return false; }
+    const auto index = static_cast<std::size_t>(output - output_channels_.data());
+    const std::uint32_t bit = 1U << index;
+    for (std::size_t i = 0; i < allocated_channels_.load(std::memory_order_relaxed); ++i)
+        app_channels_[i].output_mask.fetch_and(~bit, std::memory_order_release);
+    capture_channel_.output_mask.fetch_and(~bit, std::memory_order_release);
+    output->linked.store(false, std::memory_order_release);
+    trace_output("delete.before-destroy", output, output->node_name);
+    lock.unlock();
+    destroy_output_stream(*output);
+    trace_output("delete.after-destroy", output, output->node_name);
+    for (auto& stream : playback_streams_) {
+        stream.audio[index].discard_all();
+    }
+    capture_channel_.audio[index].discard_all();
+    lock.lock();
+    output->in_use = false;
+    output->name.clear();
+    output->node_name.clear();
+    output->node_id = PW_ID_ANY;
+    trace_output("delete.complete", output);
+    return true;
+}
+
+PipeWireEngine::OutputChannel* PipeWireEngine::resolve_output_locked(std::string_view selector,
+                                                                    std::string& error)
+{
+    std::uint32_t node_id = PW_ID_ANY;
+    const auto [end, parse_error] = std::from_chars(selector.data(), selector.data() + selector.size(), node_id);
+    for (auto& output : output_channels_) {
+        if (!output.in_use) continue;
+        if (output.name == selector || output.node_name == selector ||
+            (parse_error == std::errc{} && end == selector.data() + selector.size() && output.node_id == node_id))
+            return &output;
+    }
+    error = "unknown output channel or PipeWire node: " + std::string(selector);
+    return nullptr;
+}
+
+bool PipeWireEngine::assign_output_sink_locked(std::string_view output_selector,
+                                               std::string_view sink_selector, bool assigned,
+                                               std::string& error)
+{
+    OutputChannel* output = resolve_output_locked(output_selector, error);
+    if (output == nullptr) return false;
+    if (output->node_id == PW_ID_ANY || default_metadata_ == nullptr) {
+        error = "output channel is not ready in PipeWire";
+        return false;
+    }
+    NodeInfo* sink = nullptr;
+    std::string_view id_text = sink_selector;
+    if (id_text.starts_with("sink-")) id_text.remove_prefix(5);
+    std::uint32_t sink_id = PW_ID_ANY;
+    const auto [end, parse_error] = std::from_chars(id_text.data(), id_text.data() + id_text.size(), sink_id);
+    if (parse_error == std::errc{} && end == id_text.data() + id_text.size()) {
+        const auto found = nodes_.find(sink_id);
+        if (found != nodes_.end() && found->second.media_class == "Audio/Sink" &&
+            !found->second.name.starts_with("shatter.stream.")) sink = &found->second;
+    } else {
+        for (auto& [id, node] : nodes_) {
+            (void)id;
+            if (node.media_class != "Audio/Sink" || node.name.starts_with("shatter.stream.")) continue;
+            if (node.name != sink_selector && node.description != sink_selector) continue;
+            if (sink != nullptr) { error = "playback sink name is ambiguous; use its sink ID"; return false; }
+            sink = &node;
+        }
+    }
+    if (sink == nullptr) { error = "unknown PipeWire playback sink: " + std::string(sink_selector); return false; }
+    if (!assigned && output->sink_node_id.load(std::memory_order_acquire) != sink->node_id) {
+        error = "output channel is not assigned to playback sink: " + std::string(sink_selector);
+        return false;
+    }
+    pw_properties* stream_properties = pw_properties_new(PW_KEY_NODE_AUTOCONNECT,
+        assigned ? "true" : "false", nullptr);
+    if (stream_properties == nullptr) { error = "could not allocate output routing properties"; return false; }
+    const int property_result = pw_stream_update_properties(output->stream, &stream_properties->dict);
+    pw_properties_free(stream_properties);
+    if (property_result < 0) { error = "could not update output auto-connect policy"; return false; }
+    const int result = pw_metadata_set_property(default_metadata_, output->node_id, kTargetObjectKey,
+        "Spa:String", assigned ? sink->name.c_str() : "-1");
+    if (result < 0) { error = "could not update the output channel's PipeWire sink assignment"; return false; }
+    return true;
+}
+
+bool PipeWireEngine::assign_app_output_locked(std::string_view app_selector,
+                                              std::string_view output_selector, bool assigned,
+                                              std::string& error)
+{
+    AppChannel* app = resolve_channel_locked(app_selector, error);
+    if (app == nullptr) return false;
+    OutputChannel* output = resolve_output_locked(output_selector, error);
+    if (output == nullptr) return false;
+    const auto index = static_cast<std::size_t>(output - output_channels_.data());
+    const auto bit = 1U << index;
+    auto mask = app->output_mask.load(std::memory_order_relaxed);
+    if (assigned) mask |= bit;
+    else mask &= ~bit;
+    app->output_mask.store(mask, std::memory_order_release);
+    return true;
+}
+
+bool PipeWireEngine::create_output_stream(OutputChannel& output, bool autoconnect, std::string& error)
+{
+    output.events = {};
+    output.events.version = PW_VERSION_STREAM_EVENTS;
+    output.events.state_changed = &PipeWireEngine::on_output_state_changed;
+    output.events.process = &PipeWireEngine::on_output_process;
+    const std::string description = output.name == "speakers" ? "Shatter Speakers" : "Shatter output: " + output.name;
+    pw_properties* properties = pw_properties_new(
+        PW_KEY_MEDIA_TYPE, "Audio", PW_KEY_MEDIA_CATEGORY, "Playback",
+        PW_KEY_MEDIA_ROLE, "Production", PW_KEY_MEDIA_CLASS, "Stream/Output/Audio",
+        PW_KEY_NODE_NAME, output.node_name.c_str(), PW_KEY_NODE_DESCRIPTION, description.c_str(),
+        PW_KEY_NODE_AUTOCONNECT, "true", "node.dont-fallback", "true",
+        PW_KEY_APP_NAME, "Shatter", nullptr);
+    if (properties == nullptr) { error = "could not allocate PipeWire output properties"; return false; }
+    output.stream = pw_stream_new(core_, description.c_str(), properties);
+    if (output.stream == nullptr) { error = "could not create PipeWire output stream"; return false; }
+    pw_stream_add_listener(output.stream, &output.listener, &output.events, &output);
+    std::array<std::uint8_t, 1024> storage{};
+    spa_pod_builder builder = SPA_POD_BUILDER_INIT(storage.data(), storage.size());
+    const spa_pod* params[] = {build_stereo_format(&builder)};
+    auto flags = static_cast<pw_stream_flags>(PW_STREAM_FLAG_MAP_BUFFERS | PW_STREAM_FLAG_RT_PROCESS);
+    if (autoconnect) flags = static_cast<pw_stream_flags>(flags | PW_STREAM_FLAG_AUTOCONNECT);
+    if (pw_stream_connect(output.stream, PW_DIRECTION_OUTPUT, PW_ID_ANY, flags, params, 1) < 0) {
+        pw_stream_destroy(output.stream);
+        output.stream = nullptr;
+        error = "could not connect PipeWire output stream";
+        return false;
+    }
+    return true;
+}
+
+void PipeWireEngine::destroy_output_stream(OutputChannel& output)
+{
+    output.active.store(false, std::memory_order_release);
+    output.linked.store(false, std::memory_order_release);
+    output.sink_node_id.store(PW_ID_ANY, std::memory_order_release);
+    output.mixer_users.fetch_or(kMixerClosed, std::memory_order_acq_rel);
+    output.input_users.fetch_or(kMixerClosed, std::memory_order_acq_rel);
+    if (output.stream != nullptr) {
+        pw_stream_disconnect(output.stream);
+        pw_stream_destroy(output.stream);
+        output.stream = nullptr;
+    }
+    while ((output.mixer_users.load(std::memory_order_acquire) & kMixerUserMask) != 0)
+        std::this_thread::yield();
+    while ((output.input_users.load(std::memory_order_acquire) & kMixerUserMask) != 0)
+        std::this_thread::yield();
+    output.mixer_users.store(0, std::memory_order_release);
+}
+
 bool PipeWireEngine::set_capture_gain_db(float decibels, std::string& error)
 {
     if (!std::isfinite(decibels) || decibels < kMinimumGainDb || decibels > kMaximumGainDb) {
@@ -311,7 +615,10 @@ bool PipeWireEngine::set_capture_speaker_send(bool enabled, std::string& error)
         error = "select an active capture source before enabling its speaker send";
         return false;
     }
-    capture_channel_.speaker_send_enabled.store(enabled, std::memory_order_release);
+    auto mask = capture_channel_.output_mask.load(std::memory_order_relaxed);
+    if (enabled) mask |= 1U;
+    else mask &= ~1U;
+    capture_channel_.output_mask.store(mask, std::memory_order_release);
     return true;
 }
 
@@ -449,7 +756,7 @@ std::string PipeWireEngine::list_inputs(std::size_t terminal_width) const
         table << source_name << " (" << capture_channel_.source_node_id << ") ("
               << (capture_channel_.active.load(std::memory_order_relaxed) ? "connected" : "connecting")
               << "; speaker send "
-              << (capture_channel_.speaker_send_enabled.load(std::memory_order_relaxed) ? "on" : "off")
+              << ((capture_channel_.output_mask.load(std::memory_order_relaxed) & 1U) != 0 ? "on" : "off")
               << ")\n";
     }
 
@@ -482,29 +789,46 @@ std::string PipeWireEngine::list_inputs(std::size_t terminal_width) const
     return table.str();
 }
 
-std::string PipeWireEngine::list_outputs() const
+std::string PipeWireEngine::list_outputs(std::size_t terminal_width) const
 {
     std::lock_guard lock(nodes_mutex_);
     std::ostringstream table;
-    std::string speaker_endpoint = "no PipeWire sink linked";
-    const auto speaker_id = speaker_node_id_.load(std::memory_order_relaxed);
-    for (const auto& [link_id, link] : links_) {
-        (void)link_id;
-        if (link.output_node != speaker_id) {
-            continue;
-        }
-        const auto target = nodes_.find(link.input_node);
-        if (target != nodes_.end() && target->second.media_class == "Audio/Sink") {
-            speaker_endpoint = target->second.name.empty() ? target->second.description : target->second.name;
-            break;
-        }
-    }
-
+    const std::size_t width = std::max<std::size_t>(40, terminal_width);
+    const std::size_t output_width = std::clamp<std::size_t>(width / 5, 12, 24);
+    const std::size_t id_width = std::clamp<std::size_t>(width / 6, 10, 16);
+    const std::size_t node_width = std::clamp<std::size_t>(width / 4, 10, 25);
+    const std::size_t sink_width = width - output_width - id_width - node_width;
     table << "Shatter outputs\n"
-          << std::left << std::setw(24) << "Destination" << std::setw(22) << "Type" << "PipeWire endpoint\n"
-          << std::string(78, '-') << '\n'
-          << std::setw(24) << "speakers" << std::setw(22) << "Playback"
-          << kSpeakerStreamName << " -> " << speaker_endpoint << '\n';
+          << std::left << std::setw(static_cast<int>(output_width)) << fit_column("Output channel", output_width - 1)
+          << std::setw(static_cast<int>(id_width)) << fit_column("PipeWire node ID", id_width - 1)
+          << std::setw(static_cast<int>(node_width)) << fit_column("PipeWire node name", node_width - 1)
+          << fit_column("Assigned playback sink", sink_width) << '\n'
+          << std::string(output_width + id_width + node_width + sink_width, '-') << '\n';
+    for (const auto& output : output_channels_) {
+        if (!output.in_use) continue;
+        table << std::setw(static_cast<int>(output_width)) << fit_column(output.name, output_width - 1);
+        if (output.node_id == PW_ID_ANY) table << std::setw(static_cast<int>(id_width)) << "pending";
+        else table << std::setw(static_cast<int>(id_width)) << output.node_id;
+        table << std::setw(static_cast<int>(node_width)) << fit_column(output.node_name, node_width - 1);
+        std::string assigned_sinks;
+        std::vector<std::uint32_t> listed_sink_ids;
+        for (const auto& [link_id, link] : links_) {
+            (void)link_id;
+            if (link.output_node != output.node_id) continue;
+            const auto target = nodes_.find(link.input_node);
+            if (target == nodes_.end() || target->second.media_class != "Audio/Sink" ||
+                target->second.name.starts_with("shatter.stream.")) continue;
+            if (std::find(listed_sink_ids.begin(), listed_sink_ids.end(), link.input_node) != listed_sink_ids.end()) continue;
+            listed_sink_ids.push_back(link.input_node);
+            if (!assigned_sinks.empty()) assigned_sinks += ", ";
+            assigned_sinks += (target->second.name.empty() ? target->second.description : target->second.name) +
+                              " (sink-" + std::to_string(link.input_node) + ")";
+        }
+        if (assigned_sinks.empty()) assigned_sinks = "not assigned";
+        if (output.node_name == kSpeakerStreamName) assigned_sinks += " [default]";
+        table << fit_column(assigned_sinks, sink_width);
+        table << '\n';
+    }
 
     std::vector<NodeInfo> playback_sinks;
     for (const auto& [id, node] : nodes_) {
@@ -516,14 +840,21 @@ std::string PipeWireEngine::list_outputs() const
     std::sort(playback_sinks.begin(), playback_sinks.end(), [](const NodeInfo& left, const NodeInfo& right) {
         return left.name < right.name;
     });
+    const std::size_t sink_id_width = std::clamp<std::size_t>(width / 5, 12, 18);
+    const std::size_t sink_node_width = std::clamp<std::size_t>(width / 6, 10, 16);
+    const std::size_t sink_name_width = width - sink_id_width - sink_node_width;
+    table << "\nAvailable playback sinks\n"
+          << std::left << std::setw(static_cast<int>(sink_id_width)) << fit_column("Shatter sink ID", sink_id_width - 1)
+          << std::setw(static_cast<int>(sink_node_width)) << fit_column("PipeWire node ID", sink_node_width - 1)
+          << fit_column("Name", sink_name_width) << '\n'
+          << std::string(sink_id_width + sink_node_width + sink_name_width, '-') << '\n';
     for (const auto& node : playback_sinks) {
-        table << std::setw(24) << "available" << std::setw(22) << "Playback sink"
-              << (node.name.empty() ? node.description : node.name)
-              << (node.name == speaker_endpoint ? " (current speaker route)" : " (available)") << '\n';
+        table << std::setw(static_cast<int>(sink_id_width)) << fit_column("sink-" + std::to_string(node.node_id), sink_id_width - 1)
+              << std::setw(static_cast<int>(sink_node_width)) << node.node_id
+              << fit_column(node.name.empty() ? node.description : node.name, sink_name_width) << '\n';
     }
     if (playback_sinks.empty()) {
-        table << std::setw(24) << "available" << std::setw(22) << "Playback sink"
-              << "No PipeWire playback sinks found\n";
+        table << "No PipeWire playback sinks found\n";
     }
     return table.str();
 }
@@ -594,18 +925,23 @@ std::string PipeWireEngine::profile_stop(std::string& error)
 void PipeWireEngine::on_output_state_changed(void* data, pw_stream_state, pw_stream_state state,
                                              const char* error)
 {
-    auto& engine = *static_cast<PipeWireEngine*>(data);
-    {
-        std::lock_guard lock(engine.state_mutex_);
-        engine.output_ready_ = stream_is_ready(state);
-        if (state == PW_STREAM_STATE_ERROR) {
-            engine.startup_error_ = error == nullptr ? "PipeWire speaker stream failed" : error;
+    auto& output = *static_cast<OutputChannel*>(data);
+    auto& engine = *output.engine;
+    output.active.store(stream_is_ready(state), std::memory_order_release);
+    if (stream_is_ready(state) && output.stream != nullptr) {
+        output.node_id = pw_stream_get_node_id(output.stream);
+        if (&output == &engine.output_channels_[0]) {
+            engine.speaker_node_id_.store(output.node_id, std::memory_order_relaxed);
         }
-    }
-    if (stream_is_ready(state) && engine.speaker_output_ != nullptr) {
-        engine.speaker_node_id_.store(pw_stream_get_node_id(engine.speaker_output_), std::memory_order_relaxed);
         std::lock_guard lock(engine.nodes_mutex_);
         engine.refresh_output_link_locked();
+    }
+    {
+        std::lock_guard lock(engine.state_mutex_);
+        if (&output == &engine.output_channels_[0]) engine.output_ready_ = stream_is_ready(state);
+        if (state == PW_STREAM_STATE_ERROR && &output == &engine.output_channels_[0]) {
+            engine.startup_error_ = error == nullptr ? "PipeWire speaker stream failed" : error;
+        }
     }
     engine.state_changed_.notify_all();
 }
@@ -619,7 +955,8 @@ void PipeWireEngine::on_stream_input_state_changed(void* data, pw_stream_state,
 
 void PipeWireEngine::on_output_process(void* data)
 {
-    static_cast<PipeWireEngine*>(data)->output_process();
+    auto& output = *static_cast<OutputChannel*>(data);
+    output.engine->output_process(output);
 }
 
 void PipeWireEngine::on_stream_input_process(void* data)
@@ -634,7 +971,7 @@ void PipeWireEngine::on_capture_source_state_changed(void* data, pw_stream_state
     auto& engine = *static_cast<PipeWireEngine*>(data);
     engine.capture_channel_.active.store(stream_is_ready(state), std::memory_order_release);
     if (state == PW_STREAM_STATE_ERROR) {
-        engine.capture_channel_.speaker_send_enabled.store(false, std::memory_order_release);
+        engine.capture_channel_.output_mask.store(0, std::memory_order_release);
     }
 }
 
@@ -667,8 +1004,8 @@ bool PipeWireEngine::replace_capture_source(std::uint32_t source_node_id, std::s
         return true;
     }
     destroy_capture_stream();
-    capture_channel_.speaker_send_enabled.store(false, std::memory_order_release);
-    capture_channel_.audio.discard_all();
+    capture_channel_.output_mask.store(0, std::memory_order_release);
+    for (auto& ring : capture_channel_.audio) ring.discard_all();
     capture_channel_.smoothed_gain = capture_channel_.target_gain.load(std::memory_order_relaxed);
 
     pw_properties* properties = pw_properties_new(
@@ -720,7 +1057,7 @@ void PipeWireEngine::destroy_capture_stream()
     while ((capture_channel_.mixer_users.load(std::memory_order_acquire) & kMixerUserMask) != 0) {
         std::this_thread::yield();
     }
-    capture_channel_.audio.discard_all();
+    for (auto& ring : capture_channel_.audio) ring.discard_all();
     capture_channel_.mixer_users.store(0, std::memory_order_release);
     {
         std::lock_guard lock(nodes_mutex_);
@@ -832,7 +1169,7 @@ void PipeWireEngine::on_global_remove(void* data, std::uint32_t id)
     }
     if (removed_capture_source) {
         engine.destroy_capture_stream();
-        engine.capture_channel_.speaker_send_enabled.store(false, std::memory_order_release);
+        engine.capture_channel_.output_mask.store(0, std::memory_order_release);
     }
     if (removed != nullptr) {
         if (removed->sink != nullptr) {
@@ -843,7 +1180,7 @@ void PipeWireEngine::on_global_remove(void* data, std::uint32_t id)
         while ((removed->mixer_users.load(std::memory_order_acquire) & kMixerUserMask) != 0) {
             std::this_thread::yield();
         }
-        removed->audio.discard_all();
+        for (auto& ring : removed->audio) ring.discard_all();
         std::lock_guard lock(engine.nodes_mutex_);
         removed->name.clear();
         removed->application.clear();
@@ -874,9 +1211,29 @@ void PipeWireEngine::stream_input_process(PlaybackStream& stream)
                 ? 0.0F : stream.target_gain.load(std::memory_order_relaxed);
             const float increment = frames == 0 ? 0.0F
                 : (target - stream.smoothed_gain) / static_cast<float>(frames);
-            const auto written = stream.audio.write_with_gain_ramp(samples, frames, stream.smoothed_gain, increment);
+            std::size_t written = frames;
+            const auto mask = app_channels_[stream.channel_index].output_mask.load(std::memory_order_acquire);
+            for (std::size_t output_index = 0; output_index < output_channels_.size(); ++output_index) {
+                if ((mask & (1U << output_index)) == 0) continue;
+                OutputChannel& output = output_channels_[output_index];
+                std::uint32_t users = output.input_users.load(std::memory_order_acquire);
+                bool output_acquired = false;
+                while ((users & kMixerClosed) == 0) {
+                    if (output.input_users.compare_exchange_weak(users, users + 1,
+                            std::memory_order_acquire, std::memory_order_relaxed)) {
+                        output_acquired = true;
+                        break;
+                    }
+                }
+                if (!output_acquired) continue;
+                if (output.linked.load(std::memory_order_acquire)) {
+                    written = std::min(written, stream.audio[output_index].write_with_gain_ramp(
+                        samples, frames, stream.smoothed_gain, increment));
+                }
+                output.input_users.fetch_sub(1, std::memory_order_release);
+            }
             profile_scope.set_frames(frames, kSampleRate);
-            profile_scope.record_input_overrun(frames - written);
+            if (mask != 0) profile_scope.record_input_overrun(frames - written);
             stream.smoothed_gain = target;
         }
     }
@@ -900,8 +1257,25 @@ void PipeWireEngine::capture_source_process()
                 ? 0.0F : capture_channel_.target_gain.load(std::memory_order_relaxed);
             const float increment = frames == 0 ? 0.0F
                 : (target - capture_channel_.smoothed_gain) / static_cast<float>(frames);
-            capture_channel_.audio.write_with_gain_ramp(samples, frames,
-                capture_channel_.smoothed_gain, increment);
+            const auto mask = capture_channel_.output_mask.load(std::memory_order_acquire);
+            for (std::size_t output_index = 0; output_index < output_channels_.size(); ++output_index) {
+                if ((mask & (1U << output_index)) == 0) continue;
+                OutputChannel& output = output_channels_[output_index];
+                std::uint32_t users = output.input_users.load(std::memory_order_acquire);
+                bool output_acquired = false;
+                while ((users & kMixerClosed) == 0) {
+                    if (output.input_users.compare_exchange_weak(users, users + 1,
+                            std::memory_order_acquire, std::memory_order_relaxed)) {
+                        output_acquired = true;
+                        break;
+                    }
+                }
+                if (!output_acquired) continue;
+                if (output.linked.load(std::memory_order_acquire))
+                    capture_channel_.audio[output_index].write_with_gain_ramp(samples, frames,
+                        capture_channel_.smoothed_gain, increment);
+                output.input_users.fetch_sub(1, std::memory_order_release);
+            }
             capture_channel_.smoothed_gain = target;
             profile_scope.set_frames(frames, kSampleRate);
         }
@@ -909,91 +1283,92 @@ void PipeWireEngine::capture_source_process()
     pw_stream_queue_buffer(capture_channel_.source_stream, buffer);
 }
 
-void PipeWireEngine::output_process()
+void PipeWireEngine::output_process(OutputChannel& output)
 {
     RuntimeProfiler::Scope profile_scope(profiler_, RuntimeProfiler::Callback::output);
-    pw_buffer* buffer = pw_stream_dequeue_buffer(speaker_output_);
-    if (buffer == nullptr) {
+    pw_buffer* buffer = pw_stream_dequeue_buffer(output.stream);
+    if (buffer == nullptr) return;
+
+    std::uint32_t users = output.mixer_users.load(std::memory_order_acquire);
+    bool acquired = false;
+    while ((users & kMixerClosed) == 0) {
+        if (output.mixer_users.compare_exchange_weak(users, users + 1,
+                std::memory_order_acquire, std::memory_order_relaxed)) {
+            acquired = true;
+            break;
+        }
+    }
+    if (!acquired) {
+        pw_stream_queue_buffer(output.stream, buffer);
         return;
     }
+
     if (buffer->buffer != nullptr && buffer->buffer->n_datas > 0) {
         spa_data& data = buffer->buffer->datas[0];
         if (data.data != nullptr && data.chunk != nullptr) {
+            const std::size_t output_index = static_cast<std::size_t>(&output - output_channels_.data());
+            const std::uint32_t output_bit = 1U << output_index;
             const auto capacity_frames = static_cast<std::size_t>(data.maxsize) / (sizeof(float) * kChannels);
-            // requested is a frame count; maxsize is the backing buffer's byte capacity.
             const auto requested_frames = buffer->requested == 0
-                ? capacity_frames
-                : static_cast<std::size_t>(buffer->requested);
+                ? capacity_frames : static_cast<std::size_t>(buffer->requested);
             const auto frames = std::min(capacity_frames, requested_frames);
             profile_scope.set_frames(frames, kSampleRate);
             if (profiler_.active()) {
                 pw_time timing{};
-                if (pw_stream_get_time_n(speaker_output_, &timing, sizeof(timing)) == 0 && timing.rate.denom != 0) {
+                if (pw_stream_get_time_n(output.stream, &timing, sizeof(timing)) == 0 && timing.rate.denom != 0) {
                     const auto delay_ns = timing.delay > 0
                         ? static_cast<std::uint64_t>(timing.delay) * timing.rate.num * 1'000'000'000ULL /
-                            timing.rate.denom
-                        : 0;
-                    const auto queued_frames = timing.queued / (sizeof(float) * kChannels);
-                    profile_scope.record_pipewire_time(delay_ns, queued_frames);
+                            timing.rate.denom : 0;
+                    profile_scope.record_pipewire_time(delay_ns, timing.queued / (sizeof(float) * kChannels));
                 }
             }
+
             auto* samples = reinterpret_cast<float*>(data.data);
             std::fill(samples, samples + frames * kChannels, 0.0F);
-
-            std::array<float, max_app_channels> channel_start{};
-            std::array<float, max_app_channels> channel_increment{};
             std::array<float, 1024 * kChannels> channel_mix{};
             const auto channel_count = allocated_channels_.load(std::memory_order_acquire);
             const auto stream_count = allocated_streams_.load(std::memory_order_acquire);
-            for (std::size_t channel_index = 0; channel_index < channel_count; ++channel_index) {
-                AppChannel& channel = app_channels_[channel_index];
-                const float target = channel.muted.load(std::memory_order_relaxed)
-                    ? 0.0F : channel.target_gain.load(std::memory_order_relaxed);
-                channel_start[channel_index] = channel.smoothed_gain;
-                channel_increment[channel_index] = frames == 0 ? 0.0F
-                    : (target - channel.smoothed_gain) / static_cast<float>(frames);
-            }
-
             for (std::size_t offset = 0; offset < frames; offset += 1024) {
                 const auto block_frames = std::min<std::size_t>(1024, frames - offset);
+                const auto output_offset = offset * kChannels;
                 for (std::size_t channel_index = 0; channel_index < channel_count; ++channel_index) {
+                    AppChannel& channel = app_channels_[channel_index];
+                    const bool assigned = (channel.output_mask.load(std::memory_order_acquire) & output_bit) != 0;
                     std::fill(channel_mix.begin(), channel_mix.begin() + block_frames * kChannels, 0.0F);
                     for (std::size_t stream_index = 0; stream_index < stream_count; ++stream_index) {
                         PlaybackStream& stream = playback_streams_[stream_index];
-                        if (!stream.active.load(std::memory_order_acquire) ||
-                            stream.channel_index != channel_index) {
-                            continue;
-                        }
-                        std::uint32_t users = stream.mixer_users.load(std::memory_order_acquire);
-                        bool acquired = false;
-                        while ((users & kMixerClosed) == 0) {
-                            if (stream.mixer_users.compare_exchange_weak(users, users + 1,
+                        if (!stream.active.load(std::memory_order_acquire) || stream.channel_index != channel_index) continue;
+                        std::uint32_t stream_users = stream.mixer_users.load(std::memory_order_acquire);
+                        bool stream_acquired = false;
+                        while ((stream_users & kMixerClosed) == 0) {
+                            if (stream.mixer_users.compare_exchange_weak(stream_users, stream_users + 1,
                                     std::memory_order_acquire, std::memory_order_relaxed)) {
-                                acquired = true;
+                                stream_acquired = true;
                                 break;
                             }
                         }
-                        if (!acquired || !stream.active.load(std::memory_order_acquire)) {
-                            if (acquired) {
-                                stream.mixer_users.fetch_sub(1, std::memory_order_release);
-                            }
+                        if (!stream_acquired || !stream.active.load(std::memory_order_acquire)) {
+                            if (stream_acquired) stream.mixer_users.fetch_sub(1, std::memory_order_release);
                             continue;
                         }
-                        profile_scope.record_ring_occupancy(stream.audio.available_frames());
-                        const auto consumed = stream.audio.accumulate(channel_mix.data(), block_frames, 1.0F);
+                        auto& ring = stream.audio[output_index];
+                        profile_scope.record_ring_occupancy(ring.available_frames());
+                        const auto consumed = ring.accumulate(channel_mix.data(), block_frames, 1.0F);
                         profile_scope.record_unfilled_mix_frames(block_frames - consumed);
                         stream.mixer_users.fetch_sub(1, std::memory_order_release);
                     }
-
-                    float gain = channel_start[channel_index] + channel_increment[channel_index] *
-                        static_cast<float>(offset);
-                    const auto output_offset = offset * kChannels;
+                    if (!assigned) continue;
+                    const float target = channel.muted.load(std::memory_order_relaxed)
+                        ? 0.0F : channel.target_gain.load(std::memory_order_relaxed);
+                    float gain = channel.smoothed_gain[output_index];
+                    const float increment = block_frames == 0 ? 0.0F
+                        : (target - gain) / static_cast<float>(block_frames);
                     for (std::size_t frame = 0; frame < block_frames; ++frame) {
                         samples[output_offset + frame * kChannels] += channel_mix[frame * kChannels] * gain;
-                        samples[output_offset + frame * kChannels + 1] +=
-                            channel_mix[frame * kChannels + 1] * gain;
-                        gain += channel_increment[channel_index];
+                        samples[output_offset + frame * kChannels + 1] += channel_mix[frame * kChannels + 1] * gain;
+                        gain += increment;
                     }
+                    channel.smoothed_gain[output_index] = target;
                 }
 
                 std::fill(channel_mix.begin(), channel_mix.begin() + block_frames * kChannels, 0.0F);
@@ -1007,31 +1382,24 @@ void PipeWireEngine::output_process()
                     }
                 }
                 if (capture_acquired) {
-                    const auto consumed = capture_channel_.audio.read(channel_mix.data(), block_frames);
-                    profile_scope.record_ring_occupancy(capture_channel_.audio.available_frames());
+                    auto& ring = capture_channel_.audio[output_index];
+                    const auto consumed = ring.read(channel_mix.data(), block_frames);
+                    profile_scope.record_ring_occupancy(ring.available_frames());
                     profile_scope.record_unfilled_mix_frames(block_frames - consumed);
-                    const bool send_enabled = capture_channel_.speaker_send_enabled.load(std::memory_order_acquire);
-                    if (send_enabled) {
-                        const auto output_offset = offset * kChannels;
-                        for (std::size_t sample = 0; sample < block_frames * kChannels; ++sample) {
+                    if ((capture_channel_.output_mask.load(std::memory_order_acquire) & output_bit) != 0) {
+                        for (std::size_t sample = 0; sample < block_frames * kChannels; ++sample)
                             samples[output_offset + sample] += channel_mix[sample];
-                        }
                     }
                     capture_channel_.mixer_users.fetch_sub(1, std::memory_order_release);
                 }
-            }
-
-            for (std::size_t channel_index = 0; channel_index < channel_count; ++channel_index) {
-                AppChannel& channel = app_channels_[channel_index];
-                channel.smoothed_gain = channel.muted.load(std::memory_order_relaxed)
-                    ? 0.0F : channel.target_gain.load(std::memory_order_relaxed);
             }
             data.chunk->offset = 0;
             data.chunk->stride = sizeof(float) * kChannels;
             data.chunk->size = frames * sizeof(float) * kChannels;
         }
     }
-    pw_stream_queue_buffer(speaker_output_, buffer);
+    output.mixer_users.fetch_sub(1, std::memory_order_release);
+    pw_stream_queue_buffer(output.stream, buffer);
 }
 
 void PipeWireEngine::update_playback_stream_state(PlaybackStream& stream, pw_stream_state state,
@@ -1052,20 +1420,24 @@ void PipeWireEngine::update_playback_stream_state(PlaybackStream& stream, pw_str
 
 void PipeWireEngine::refresh_output_link_locked()
 {
-    const auto speaker_id = speaker_node_id_.load(std::memory_order_relaxed);
-    bool linked = false;
+    for (auto& output : output_channels_) {
+        output.linked.store(false, std::memory_order_relaxed);
+        output.sink_node_id.store(PW_ID_ANY, std::memory_order_relaxed);
+    }
     for (const auto& [link_id, link] : links_) {
         (void)link_id;
-        if (link.output_node != speaker_id) {
-            continue;
-        }
         const auto target = nodes_.find(link.input_node);
-        if (target != nodes_.end() && target->second.media_class == "Audio/Sink") {
-            linked = true;
-            break;
+        if (target == nodes_.end() || target->second.media_class != "Audio/Sink" ||
+            target->second.name.starts_with("shatter.stream.")) continue;
+        for (auto& output : output_channels_) {
+            if (output.in_use && output.node_id == link.output_node) {
+                output.sink_node_id.store(link.input_node, std::memory_order_relaxed);
+                output.linked.store(true, std::memory_order_release);
+                break;
+            }
         }
     }
-    output_linked_.store(linked, std::memory_order_relaxed);
+    output_linked_.store(output_channels_[0].linked.load(std::memory_order_relaxed), std::memory_order_relaxed);
 }
 
 void PipeWireEngine::handle_playback_node(std::uint32_t node_id, NodeInfo node)
@@ -1197,6 +1569,7 @@ std::size_t PipeWireEngine::get_or_create_channel_locked(const NodeInfo& node)
     channel.id = make_channel_id(node.identity);
     channel.name = !node.application.empty() ? node.application
         : !node.process_binary.empty() ? node.process_binary : node.identity;
+    channel.smoothed_gain.fill(1.0F);
     for (const auto& saved : saved_apps_) if (saved.identity == channel.identity) {
         channel.name = saved.name;
         channel.target_gain.store(std::pow(10.0F, saved.gain_db / 20.0F));
@@ -1287,10 +1660,13 @@ void PipeWireEngine::cleanup()
         }
         stream.active.store(false, std::memory_order_relaxed);
     }
-    if (speaker_output_ != nullptr) {
-        pw_stream_disconnect(speaker_output_);
-        pw_stream_destroy(speaker_output_);
-        speaker_output_ = nullptr;
+    for (std::size_t index = 0; index < output_channels_.size(); ++index) {
+        auto& output = output_channels_[index];
+        if (output.stream != nullptr) destroy_output_stream(output);
+        output.node_id = PW_ID_ANY;
+        output.sink_node_id.store(PW_ID_ANY, std::memory_order_release);
+        output.linked.store(false, std::memory_order_release);
+        output.in_use = index == 0;
     }
     if (default_metadata_ != nullptr) {
         pw_proxy_destroy(reinterpret_cast<pw_proxy*>(default_metadata_));

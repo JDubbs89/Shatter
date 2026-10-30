@@ -37,6 +37,12 @@ constexpr std::string_view kUsage =
     "       shatter set mute <app|stream> <name-or-id> <on|off>\n"
     "       shatter set capture <source|send> <value>\n"
     "       shatter rename <app|stream> <old-name> <new-name>\n"
+    "       shatter make out <name>\n"
+    "       shatter delete out <name-or-pw-node-id>\n"
+    "       shatter assign out <output-name-or-id> <sink-name-or-id>\n"
+    "       shatter unassign out <output-name-or-id> <sink-name-or-id>\n"
+    "       shatter assign app <app-name-or-id> <output-name-or-id>\n"
+    "       shatter unassign app <app-name-or-id> <output-name-or-id>\n"
     "       shatter save show <name>\n"
     "       shatter load show <name>\n"
     "       shatter help\n";
@@ -92,6 +98,18 @@ int connect_to_engine(const std::string& path)
     }
 
     return fd;
+}
+
+void trace_output_command(std::string_view stage, std::string_view detail)
+{
+    if (std::getenv("SHATTER_TRACE_OUTPUT") == nullptr) return;
+    const char* path = std::getenv("SHATTER_TRACE_OUTPUT_FILE");
+    if (path == nullptr || *path == '\0') path = "/tmp/shatter-output-trace.log";
+    const int fd = ::open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
+    if (fd < 0) return;
+    dprintf(fd, "[output-trace] pid=%ld stage=%.*s detail=%.*s\n", static_cast<long>(getpid()),
+            static_cast<int>(stage.size()), stage.data(), static_cast<int>(detail.size()), detail.data());
+    ::close(fd);
 }
 
 std::string request(std::string_view command)
@@ -249,6 +267,8 @@ int serve()
             if (!input.empty() && input.back() == '\n') {
                 input.remove_suffix(1);
             }
+            if (input.starts_with("OUTPUT-") || input.starts_with("APP-OUTPUT-"))
+                trace_output_command("server.command", input);
             if (input == "PING") {
                 if (audio_engine.available()) {
                     reply = "OK running audio-ready\n";
@@ -282,6 +302,15 @@ int serve()
                 const auto [end, parse_error] = std::from_chars(value.data(), value.data() + value.size(), width);
                 if (parse_error != std::errc{} || end != value.data() + value.size()) reply = "ERR invalid terminal width\n";
                 else reply = audio_engine.list_inputs(width);
+            } else if (input.starts_with("LIST-OUT ") || input.starts_with("LIST-ALL ")) {
+                const bool all = input.starts_with("LIST-ALL ");
+                constexpr std::size_t prefix = 9;
+                std::uint32_t width = 100;
+                const auto value = input.substr(prefix);
+                const auto [end, parse_error] = std::from_chars(value.data(), value.data() + value.size(), width);
+                if (parse_error != std::errc{} || end != value.data() + value.size()) reply = "ERR invalid terminal width\n";
+                else if (all) reply = audio_engine.list_inputs(width) + "\n" + audio_engine.list_outputs(width);
+                else reply = audio_engine.list_outputs(width);
             } else if (input == "LIST-OUT") {
                 reply = audio_engine.list_outputs();
             } else if (input == "LIST-ALL") {
@@ -317,6 +346,32 @@ int serve()
                 } else {
                     reply = "ERR " + rename_error + "\n";
                 }
+            } else if (input.starts_with("OUTPUT-MAKE ")) {
+                std::istringstream parsed{std::string(input)};
+                std::string action, name, extra, output_error;
+                if (!(parsed >> action >> std::quoted(name)) || (parsed >> extra)) reply = "ERR expected OUTPUT-MAKE <name>\n";
+                else if (audio_engine.make_output(name, output_error)) reply = "OK output channel created: " + name + "\n";
+                else reply = "ERR " + output_error + "\n";
+            } else if (input.starts_with("OUTPUT-DELETE ")) {
+                std::istringstream parsed{std::string(input)};
+                std::string action, selector, extra, output_error;
+                if (!(parsed >> action >> std::quoted(selector)) || (parsed >> extra)) reply = "ERR expected OUTPUT-DELETE <name-or-id>\n";
+                else if (audio_engine.delete_output(selector, output_error)) reply = "OK output channel deleted: " + selector + "\n";
+                else reply = "ERR " + output_error + "\n";
+            } else if (input.starts_with("OUTPUT-SINK-")) {
+                std::istringstream parsed{std::string(input)};
+                std::string action, output, sink, extra, output_error;
+                if (!(parsed >> action >> std::quoted(output) >> std::quoted(sink)) || (parsed >> extra)) reply = "ERR expected OUTPUT-SINK <output> <sink>\n";
+                else if (audio_engine.assign_output_sink(output, sink, action == "OUTPUT-SINK-ASSIGN", output_error))
+                    reply = std::string("OK output sink ") + (action == "OUTPUT-SINK-ASSIGN" ? "assigned\n" : "unassigned\n");
+                else reply = "ERR " + output_error + "\n";
+            } else if (input.starts_with("APP-OUTPUT-")) {
+                std::istringstream parsed{std::string(input)};
+                std::string action, app, output, extra, output_error;
+                if (!(parsed >> action >> std::quoted(app) >> std::quoted(output)) || (parsed >> extra)) reply = "ERR expected APP-OUTPUT <app> <output>\n";
+                else if (audio_engine.assign_app_output(app, output, action == "APP-OUTPUT-ASSIGN", output_error))
+                    reply = std::string("OK app channel output ") + (action == "APP-OUTPUT-ASSIGN" ? "assigned\n" : "unassigned\n");
+                else reply = "ERR " + output_error + "\n";
             } else if (input.starts_with("CAPTURE-SOURCE ")) {
                 std::string value(input.substr(std::string_view("CAPTURE-SOURCE ").size()));
                 std::uint32_t source_id = PW_ID_ANY;
@@ -410,6 +465,9 @@ int serve()
                 }
             }
         }
+        if (received > 0 && (std::string_view(command.data()).starts_with("OUTPUT-") ||
+                             std::string_view(command.data()).starts_with("APP-OUTPUT-")))
+            trace_output_command("server.reply", reply);
         reply += ".\n";
         std::size_t sent = 0;
         while (sent < reply.size()) {
@@ -493,6 +551,20 @@ int run_cli(int argc, char** argv)
         normalized.emplace_back(argv[2]);
         normalized.emplace_back(argv[3]);
         normalized.emplace_back(argv[4]);
+    } else if (arg(1) == "make" && arg(2) == "out" && argc == 4) {
+        normalized.emplace_back("--make-out");
+        normalized.emplace_back(argv[3]);
+    } else if (arg(1) == "delete" && arg(2) == "out" && argc == 4) {
+        normalized.emplace_back("--delete-out");
+        normalized.emplace_back(argv[3]);
+    } else if ((arg(1) == "assign" || arg(1) == "unassign") && argc == 5 && arg(2) == "out") {
+        normalized.emplace_back(arg(1) == "assign" ? "--assign-output" : "--unassign-output");
+        normalized.emplace_back(argv[3]);
+        normalized.emplace_back(argv[4]);
+    } else if ((arg(1) == "assign" || arg(1) == "unassign") && argc == 5 && arg(2) == "app") {
+        normalized.emplace_back(arg(1) == "assign" ? "--assign-app-output" : "--unassign-app-output");
+        normalized.emplace_back(argv[3]);
+        normalized.emplace_back(argv[4]);
     } else if ((arg(1) == "save" || arg(1) == "load") && argc == 4 && arg(2) == "show") {
         normalized.emplace_back(arg(1) == "save" ? "--config-save" : "--config-load");
         normalized.emplace_back(argv[3]);
@@ -505,20 +577,46 @@ int run_cli(int argc, char** argv)
     }
 
     try {
+        if (argc == 3 && (std::string_view(argv[1]) == "--make-out" ||
+                          std::string_view(argv[1]) == "--delete-out")) {
+            std::ostringstream command;
+            command << (std::string_view(argv[1]) == "--make-out" ? "OUTPUT-MAKE " : "OUTPUT-DELETE ")
+                    << std::quoted(argv[2]);
+            const std::string response = request(command.str());
+            if (response.empty()) { std::cerr << "Shatter engine is unavailable; run `shatter start` first.\n"; return 1; }
+            if (response.starts_with("ERR ")) { std::cerr << response; return 1; }
+            std::cout << response;
+            return 0;
+        }
+        if (argc == 4 && (std::string_view(argv[1]) == "--assign-output" ||
+                          std::string_view(argv[1]) == "--unassign-output" ||
+                          std::string_view(argv[1]) == "--assign-app-output" ||
+                          std::string_view(argv[1]) == "--unassign-app-output")) {
+            const std::string_view action(argv[1]);
+            const bool output_sink = action == "--assign-output" || action == "--unassign-output";
+            const bool assigned = action == "--assign-output" || action == "--assign-app-output";
+            std::ostringstream command;
+            if (output_sink) command << (assigned ? "OUTPUT-SINK-ASSIGN " : "OUTPUT-SINK-UNASSIGN ");
+            else command << (assigned ? "APP-OUTPUT-ASSIGN " : "APP-OUTPUT-UNASSIGN ");
+            command << std::quoted(argv[2]) << ' ' << std::quoted(argv[3]);
+            const std::string response = request(command.str());
+            if (response.empty()) { std::cerr << "Shatter engine is unavailable; run `shatter start` first.\n"; return 1; }
+            if (response.starts_with("ERR ")) { std::cerr << response; return 1; }
+            std::cout << response;
+            return 0;
+        }
         if (argc == 2) {
             const std::string_view command(argv[1]);
             std::string_view request_command;
             std::string dynamic_command;
-            if (command == "--list-in") {
+            if (command == "--list-in" || command == "--list-out" || command == "--list-all") {
                 struct winsize size{};
                 const unsigned short width = ioctl(STDOUT_FILENO, TIOCGWINSZ, &size) == 0 && size.ws_col > 0
                     ? size.ws_col : 100;
-                dynamic_command = "LIST-IN " + std::to_string(width);
+                const std::string_view list_command = command == "--list-in" ? "LIST-IN "
+                    : command == "--list-out" ? "LIST-OUT " : "LIST-ALL ";
+                dynamic_command = std::string(list_command) + std::to_string(width);
                 request_command = dynamic_command;
-            } else if (command == "--list-out") {
-                request_command = "LIST-OUT";
-            } else if (command == "--list-all") {
-                request_command = "LIST-ALL";
             } else if (command == "--profile-start") {
                 request_command = "PROFILE-START";
             } else if (command == "--profile-stop") {

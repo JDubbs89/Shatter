@@ -4,7 +4,7 @@ A single-user Linux desktop mixer daemon for persistent application and device r
 
 ## Project status
 
-This repository is an early prototype. The engine groups PipeWire playback streams into per-application channels, provides per-stream and per-channel gain and mute controls, and routes the mix to the PipeWire default playback sink. A selected PipeWire capture source can also feed an independent microphone channel with its own gain and an explicit speaker send.
+This repository is an early prototype. Shatter groups PipeWire playback streams into per-application channels and provides per-stream and per-channel gain and mute controls. App channels can be sent to named output channels, including the built-in `speakers` output, which follows the default playback sink. You can create additional outputs and route each one to a playback sink. Each output currently has one sink assignment. A selected PipeWire capture source can feed an independent microphone channel with its own gain and an optional speaker send.
 
 ## Architecture and domain
 
@@ -50,12 +50,19 @@ shatter list in # choose a capture source node ID
 shatter set capture source 57
 shatter set gain capture -6
 shatter set capture send on
+shatter make out Headphones
+shatter assign out Headphones sink-57
+shatter assign app Brave Headphones
+shatter unassign app Brave speakers
+shatter list out
 shatter start profile
 # use audio normally
 shatter stop profile
 ```
 
 The older dash-prefixed command forms remain accepted as compatibility aliases.
+
+`shatter list out` shows Shatter outputs and available playback sinks. Use the generated `sink-<PipeWire node ID>` value shown there when routing an output. User-created outputs remain disconnected until you assign one to a playback sink. Use `shatter unassign out <output> <sink>` to detach it, and `shatter delete out <output>` to remove it.
 
 Profiling requires the engine's PipeWire output to be ready. The stop command prints callback timing percentiles, callback budget overruns, process CPU time, dropped and unfilled ring-buffer frames, Shatter input ring occupancy, and PipeWire's reported device delay and queued audio. Unfilled ring frames can include idle or silent streams. Callback timing measures Shatter's processing work; ring occupancy, PipeWire delay, and queued audio are separate parts of the audio path, and this summary is not an end-to-end loopback latency measurement.
 

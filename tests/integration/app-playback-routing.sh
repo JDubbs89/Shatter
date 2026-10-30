@@ -59,11 +59,17 @@ wireplumber --profile policy >"$test_root/wireplumber.log" 2>&1 &
 wireplumber_pid=$!
 sleep 0.5
 pw-cli create-node adapter '{ factory.name = support.null-audio-sink node.name = shatter-test-speakers node.description = "Shatter Test Speakers" media.class = Audio/Sink audio.position = [ FL FR ] object.linger = true }' >/dev/null
+pw-cli create-node adapter '{ factory.name = support.null-audio-sink node.name = shatter-test-headphones node.description = "Shatter Test Headphones" media.class = Audio/Sink audio.position = [ FL FR ] object.linger = true }' >/dev/null
 sleep 0.3
 sink_id=$(wpctl status -n | awk '/shatter-test-speakers/ { for (i=1; i<=NF; ++i) if ($i ~ /^[0-9]+\.$/) { id=$i; sub(/\.$/, "", id); print id; exit } }')
+headphones_sink_id=$(wpctl status -n | awk '/shatter-test-headphones/ { for (i=1; i<=NF; ++i) if ($i ~ /^[0-9]+\.$/) { id=$i; sub(/\.$/, "", id); print id; exit } }')
 if [ -z "$sink_id" ]; then
     cat "$test_root/wireplumber.log" >&2
     echo "isolated test sink was not created" >&2
+    exit 1
+fi
+if [ -z "$headphones_sink_id" ]; then
+    echo "isolated headphone sink was not created" >&2
     exit 1
 fi
 wpctl set-default "$sink_id" >/dev/null
@@ -142,6 +148,7 @@ record_monitor()
 {
     destination=$1
     sample_count=${2:-48000}
+    monitor_sink=${3:-shatter-test-speakers}
     pw-record --target 0 --rate 48000 --channels 2 --format f32 --raw --sample-count "$sample_count" "$destination" \
         >"$test_root/record.log" 2>&1 &
     record_pid=$!
@@ -155,8 +162,8 @@ record_monitor()
         echo "PipeWire recorder ports did not appear" >&2
         return 1
     fi
-    pw-link shatter-test-speakers:monitor_FL pw-record:input_FL >/dev/null
-    pw-link shatter-test-speakers:monitor_FR pw-record:input_FR >/dev/null
+    pw-link "$monitor_sink:monitor_FL" pw-record:input_FL >/dev/null
+    pw-link "$monitor_sink:monitor_FR" pw-record:input_FR >/dev/null
     wait "$record_pid" || [ -s "$destination" ]
 }
 
@@ -181,6 +188,61 @@ fi
 "$binary" --set-mute stream "$stream_a_id" off
 "$binary" --set-mute app "$app_a_id" on
 "$binary" --set-mute app "$app_a_id" off
+
+# A named output is an independently routable PipeWire playback node.
+if "$binary" make out "$headphones_sink_id" >/dev/null 2>&1; then
+    echo "numeric output name was accepted even though numeric selectors mean PipeWire node IDs" >&2
+    exit 1
+fi
+if "$binary" make out shatter.output.1 >/dev/null 2>&1; then
+    echo "generated PipeWire node name was accepted as an output name" >&2
+    exit 1
+fi
+if "$binary" make out shatter.speakers >/dev/null 2>&1; then
+    echo "built-in PipeWire node name was accepted as an output name" >&2
+    exit 1
+fi
+"$binary" make out "Headphone Monitor"
+"$binary" assign out "Headphone Monitor" "sink-$headphones_sink_id"
+"$binary" assign app "$app_a_id" "Headphone Monitor"
+"$binary" unassign app "$app_a_id" speakers
+sleep 0.3
+output_listing=$("$binary" --list-out)
+case "$output_listing" in
+    *"Headphone Monitor"*"sink-$headphones_sink_id"*) ;;
+    *) echo "named output sink link is missing: $output_listing" >&2; pw-link -l >&2; exit 1 ;;
+esac
+record_monitor "$test_root/named-output.raw" 96000 shatter-test-headphones
+python3 - "$test_root/named-output.raw" <<'PY'
+import math
+import struct
+import sys
+
+raw = open(sys.argv[1], "rb").read()
+samples = struct.unpack("<%df" % (len(raw) // 4), raw)
+rms = math.sqrt(sum(sample * sample for sample in samples) / len(samples)) if samples else 0.0
+if rms < 0.005:
+    raise SystemExit("assigned app channel produced no audio at the named output sink: rms=%s" % rms)
+PY
+if "$binary" unassign out "Headphone Monitor" "sink-$sink_id" >/dev/null 2>&1; then
+    echo "unassign accepted a sink that was not assigned to the output" >&2
+    exit 1
+fi
+"$binary" unassign out "Headphone Monitor" "sink-$headphones_sink_id"
+sleep 0.3
+output_row=$(printf '%s\n' "$($binary --list-out)" | awk '/Headphone Monitor/ { print; exit }')
+case "$output_row" in
+    *"sink-"*) echo "unassigned output remained linked to a playback sink: $output_row" >&2; exit 1 ;;
+    *) ;;
+esac
+"$binary" unassign app "$app_a_id" "Headphone Monitor"
+"$binary" delete out "Headphone Monitor"
+"$binary" assign app "$app_a_id" speakers
+output_listing=$("$binary" --list-out)
+case "$output_listing" in
+    *"Headphone Monitor"*) echo "deleted output channel remained in the output list: $output_listing" >&2; exit 1 ;;
+    *) ;;
+esac
 
 kill "$initial_playback_pid"
 wait "$initial_playback_pid" 2>/dev/null || true

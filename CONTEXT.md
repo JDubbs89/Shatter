@@ -20,6 +20,10 @@ _Avoid_: Playback channel (a stream is one feed into the application channel)
 An input channel receiving audio from a physical capture device, such as a microphone.
 _Avoid_: Microphone destination
 
+**Output channel**:
+A named mixer destination that collects sends from input channels and delivers its mix to one or more playback sinks.
+_Avoid_: Output sink (that is a PipeWire endpoint), output bus
+
 **Mix bus**:
 A named mix that collects sends from input channels and can feed one or more matrices.
 _Avoid_: Output bus (ambiguous with physical or virtual destination)
@@ -51,5 +55,5 @@ A destination’s choice to follow the system default device or remain pinned to
 _Avoid_: Device name (names may change and are not necessarily stable identity)
 
 **Send**:
-A channel’s routed contribution to a mix bus, with its own level; v1 sends are post-fader.
+A channel’s routed contribution to an output channel or mix bus, with its own level; direct sends are post-fader.
 _Avoid_: Link (a PipeWire graph connection is not necessarily a mixer send)
