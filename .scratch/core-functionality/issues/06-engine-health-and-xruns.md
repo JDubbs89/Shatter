@@ -4,10 +4,10 @@
 
 **Blocked by:** None (can start immediately).
 
-**Status:** ready-for-agent
+**Status:** ready-for-human
 
-- [ ] Engine health is queryable and distinguishes running, degraded, and failed-open states.
-- [ ] Xruns are counted and reported without blocking realtime processing.
-- [ ] Current I/O latency information is reported with its measurement source identified.
-- [ ] CLI output makes health and xrun changes understandable.
-- [ ] Automated coverage verifies state transitions and xrun reporting behavior.
+- [x] Engine health is queryable and distinguishes running, degraded, and failed-open states.
+- [x] Xruns are counted and reported without blocking realtime processing.
+- [x] Current I/O latency information is reported with its measurement source identified.
+- [x] CLI output makes health and xrun changes understandable.
+- [x] Automated coverage verifies state transitions and xrun reporting behavior.

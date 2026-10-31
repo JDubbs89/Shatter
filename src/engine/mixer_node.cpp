@@ -85,7 +85,11 @@ void PipeWireEngine::stream_input_process(PlaybackStream& stream)
                 }
             }
             profile_scope.set_frames(frames, kSampleRate);
-            if (mask != 0) profile_scope.record_input_overrun(frames - written);
+            if (mask != 0 && written < frames) {
+                const auto dropped = frames - written;
+                profile_scope.record_input_overrun(dropped);
+                xruns_.record_input_overrun(dropped);
+            }
             stream.smoothed_gain = target;
         }
     }
@@ -117,6 +121,7 @@ void PipeWireEngine::capture_source_process()
             capture_channel_.meter.observe_ramped(samples, frames, kChannels,
                 capture_channel_.smoothed_gain, increment);
             const auto mask = capture_channel_.output_mask.load(std::memory_order_acquire);
+            std::uint64_t dropped_frames = 0;
             for (std::size_t output_index = 0; output_index < output_channels_.size(); ++output_index) {
                 if ((mask & (1U << output_index)) == 0) continue;
                 OutputChannel& output = output_channels_[output_index];
@@ -124,9 +129,15 @@ void PipeWireEngine::capture_source_process()
                 if (!output_guard) continue;
                 if (output.input_generation.load(std::memory_order_acquire) == output_generations[output_index] &&
                     (capture_channel_.output_mask.load(std::memory_order_acquire) & (1U << output_index)) != 0 &&
-                    output.linked.load(std::memory_order_acquire))
-                    capture_channel_.audio[output_index].write_with_gain_ramp(samples, frames,
-                        capture_channel_.smoothed_gain, increment);
+                    output.linked.load(std::memory_order_acquire)) {
+                    const auto written = capture_channel_.audio[output_index].write_with_gain_ramp(
+                        samples, frames, capture_channel_.smoothed_gain, increment);
+                    dropped_frames += frames - written;
+                }
+            }
+            if (dropped_frames != 0) {
+                profile_scope.record_input_overrun(dropped_frames);
+                xruns_.record_input_overrun(dropped_frames);
             }
             capture_channel_.smoothed_gain = target;
             profile_scope.set_frames(frames, kSampleRate);
@@ -166,6 +177,8 @@ void PipeWireEngine::output_process(OutputChannel& output)
             auto* samples = reinterpret_cast<float*>(data.data);
             std::fill(samples, samples + frames * kChannels, 0.0F);
             std::array<float, 1024 * kChannels> channel_mix{};
+            std::uint64_t playback_underrun_frames = 0;
+            std::uint64_t latest_ring_frames = 0;
             const auto channel_count = allocated_channels_.load(std::memory_order_acquire);
             const auto stream_count = allocated_streams_.load(std::memory_order_acquire);
             for (std::size_t offset = 0; offset < frames; offset += 1024) {
@@ -182,10 +195,13 @@ void PipeWireEngine::output_process(OutputChannel& output)
                         if (!stream_guard || !stream.active.load(std::memory_order_acquire)) continue;
                         auto& ring = stream.audio[output_index];
                         const auto occupancy = ring.available_frames();
+                        latest_ring_frames = std::max(latest_ring_frames,
+                            static_cast<std::uint64_t>(occupancy));
                         profile_scope.record_ring_occupancy(occupancy);
                         profile_scope.record_app_stream_ring_occupancy(occupancy);
                         const auto consumed = ring.accumulate(channel_mix.data(), block_frames, 1.0F);
                         profile_scope.record_unfilled_mix_frames(block_frames - consumed);
+                        if (assigned) playback_underrun_frames += block_frames - consumed;
                     }
                     const float target = channel.muted.load(std::memory_order_relaxed)
                         ? 0.0F : channel.target_gain.load(std::memory_order_relaxed);
@@ -210,6 +226,7 @@ void PipeWireEngine::output_process(OutputChannel& output)
                         profile_scope.record_app_stream_ring_occupancy(ring.available_frames());
                         const auto consumed = ring.read(channel_mix.data(), block_frames);
                         profile_scope.record_unfilled_mix_frames(block_frames - consumed);
+                        playback_underrun_frames += block_frames - consumed;
                         const float stream_target = stream.muted.load(std::memory_order_relaxed)
                             ? 0.0F : stream.target_gain.load(std::memory_order_relaxed);
                         const float stream_gain = stream.smoothed_send_gain[output_index];
@@ -251,6 +268,10 @@ void PipeWireEngine::output_process(OutputChannel& output)
                                 output.shutdown_fade_frames_remaining, kShutdownFadeFrames);
             }
             output.meter.observe(samples, frames * kChannels);
+            latest_input_ring_frames_[output_index].store(latest_ring_frames, std::memory_order_relaxed);
+            if (playback_underrun_frames != 0) {
+                xruns_.record_playback_underrun(playback_underrun_frames);
+            }
             data.chunk->offset = 0;
             data.chunk->stride = sizeof(float) * kChannels;
             data.chunk->size = frames * sizeof(float) * kChannels;

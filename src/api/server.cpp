@@ -84,6 +84,10 @@ int run_server()
                         ? "speaker output is disconnected" : audio_error;
                     reply = "OK running audio-unavailable: " + reason + "\n";
                 }
+            } else if (input == "HEALTH") {
+                reply = audio_engine.health_status();
+                if (!audio_engine.available() && !audio_error.empty())
+                    reply += "Backend open error: " + audio_error + "\n";
             } else if (input == "STOP") {
                 std::string save_error;
                 if (!startup_show_loaded)

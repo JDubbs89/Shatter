@@ -902,6 +902,39 @@ bool PipeWireEngine::available() const noexcept
     return available_ && output_linked_.load(std::memory_order_relaxed);
 }
 
+std::string PipeWireEngine::health_status() const
+{
+    const auto unrouted = unrouted_playback_streams_.load(std::memory_order_relaxed);
+    const auto connected = output_linked_.load(std::memory_order_relaxed);
+    const auto state = health_state(available_, connected, unrouted);
+    const auto xrun = xruns_.snapshot();
+    std::uint64_t ring_frames = 0;
+    for (const auto& occupancy : latest_input_ring_frames_)
+        ring_frames = std::max(ring_frames, occupancy.load(std::memory_order_relaxed));
+    std::ostringstream report;
+    report << "Engine health: " << health_state_name(state) << '\n';
+    if (state == HealthState::failed_open) {
+        report << "Reason: PipeWire engine did not open successfully\n";
+    } else if (state == HealthState::degraded) {
+        if (!connected) report << "Issue: speaker output is disconnected\n";
+        if (unrouted != 0) report << "Issue: " << unrouted << " playback stream(s) are unrouted\n";
+    } else {
+        report << "Issue: none detected\n";
+    }
+    report << "Xruns since engine start (Shatter ring buffers): input overruns "
+           << xrun.input_overrun_events << " events / " << xrun.input_overrun_frames << " frames; "
+           << "playback underruns " << xrun.playback_underrun_events << " events / "
+           << xrun.playback_underrun_frames << " frames\n";
+    if (available_) {
+        report << std::fixed << std::setprecision(3)
+               << "I/O buffering estimate: " << ring_frames * 1000.0 / kSampleRate
+               << " ms (latest Shatter playback input ring occupancy, at 48 kHz; excludes device latency)\n";
+    } else {
+        report << "I/O buffering estimate: unavailable (PipeWire engine is not open)\n";
+    }
+    return report.str();
+}
+
 void PipeWireEngine::begin_shutdown_fade() noexcept
 {
     shutdown_fade_requested_.store(true, std::memory_order_release);

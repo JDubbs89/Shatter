@@ -23,6 +23,7 @@ constexpr std::string_view kUsage =
     "Usage: shatter start [engine|profile]\n"
     "       shatter restart\n"
     "       shatter status [engine]\n"
+    "       shatter health\n"
     "       shatter stop [engine|profile]\n"
     "       shatter list <in|out|all>\n"
     "       shatter meters [channel-selector]\n"
@@ -144,6 +145,8 @@ int run_cli(int argc, char** argv)
         if (argc == 3) normalized.emplace_back(argv[2]);
     } else if (arg(1) == "fader" && arg(2) == "status" && argc == 3) {
         normalized.emplace_back("--fader-status");
+    } else if (arg(1) == "health" && argc == 2) {
+        normalized.emplace_back("--engine-health");
     } else if (arg(1) == "set" && arg(2) == "fader" && argc == 6) {
         normalized.emplace_back("--set-fader");
         normalized.emplace_back(argv[3]);
@@ -480,6 +483,16 @@ int run_cli(int argc, char** argv)
             const std::string response = shatter::api::request("CAPTURE-SEND " + std::string(value));
             if (response.empty()) { std::cerr << "Shatter engine is unavailable; run `shatter start` first.\n"; return 1; }
             if (response.starts_with("ERR ")) { std::cerr << response; return 1; }
+            std::cout << response;
+            return 0;
+        }
+
+        if (argc == 2 && std::string_view(argv[1]) == "--engine-health") {
+            const std::string response = shatter::api::request("HEALTH");
+            if (response.empty()) {
+                std::cerr << "Shatter engine is unavailable; run `shatter start` first.\n";
+                return 1;
+            }
             std::cout << response;
             return 0;
         }

@@ -49,6 +49,7 @@ public:
     virtual std::string list_outputs(std::size_t terminal_width = 100) const = 0;
     virtual std::string list_meters(std::string_view selector = {}) const = 0;
     virtual std::string fader_status() const = 0;
+    virtual std::string health_status() const = 0;
     virtual bool profile_start(std::string& error) = 0;
     virtual std::string profile_stop(std::string& error) = 0;
     virtual bool available() const noexcept = 0;

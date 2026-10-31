@@ -104,6 +104,11 @@ playback_pids="$playback_pids $initial_playback_pid"
 sleep 0.3
 "$binary" start
 engine_running=1
+health=$("$binary" health)
+case "$health" in
+    *"Engine health: "*"Xruns since engine start"*"I/O buffering estimate:"*"Shatter playback input ring occupancy"*) ;;
+    *) echo "expected live engine health and latency details, got: $health" >&2; exit 1 ;;
+esac
 
 listed_device_id()
 {

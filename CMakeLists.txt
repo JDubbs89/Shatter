@@ -188,6 +188,12 @@ if(BUILD_TESTING)
     target_link_libraries(meter_test PRIVATE Catch2::Catch2WithMain)
     add_test(NAME meter COMMAND meter_test)
 
+    add_executable(engine_health_test tests/unit/engine-health.cpp)
+    target_include_directories(engine_health_test PRIVATE include)
+    target_compile_features(engine_health_test PRIVATE cxx_std_20)
+    target_link_libraries(engine_health_test PRIVATE Catch2::Catch2WithMain)
+    add_test(NAME engine_health COMMAND engine_health_test)
+
     add_executable(state_store_test src/state/store.cpp tests/unit/state-store.cpp)
     target_include_directories(state_store_test PRIVATE include)
     target_compile_features(state_store_test PRIVATE cxx_std_20)

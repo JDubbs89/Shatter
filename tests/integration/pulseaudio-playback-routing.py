@@ -64,6 +64,11 @@ def main(binary):
         if started.returncode != 0:
             raise RuntimeError(started.stderr.strip() or started.stdout.strip() or "Shatter failed to start")
 
+        health = command([binary, "health"], env=env).stdout
+        if ("Engine health: running" not in health or "Xruns since engine start" not in health or
+                "I/O latency:" not in health or "pactl list sinks" not in health):
+            raise RuntimeError(f"PulseAudio health report is incomplete:\n{health}")
+
         inputs = outputs = ""
         deadline = time.monotonic() + 8
         while time.monotonic() < deadline:

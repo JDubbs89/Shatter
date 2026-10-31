@@ -41,6 +41,11 @@ public:
     std::string list_outputs(std::size_t) const override { return unavailable_message() + "\n"; }
     std::string list_meters(std::string_view) const override { return unavailable_message() + "\n"; }
     std::string fader_status() const override { return unavailable_message() + "\n"; }
+    std::string health_status() const override
+    {
+        return "Engine health: failed-open\nReason: " + unavailable_message() +
+            "\nXruns since engine start: unavailable (no audio backend)\nI/O latency: unavailable\n";
+    }
     bool profile_start(std::string& error) override { error = unavailable_message(); return false; }
     std::string profile_stop(std::string& error) override { error = unavailable_message(); return {}; }
     bool available() const noexcept override { return false; }

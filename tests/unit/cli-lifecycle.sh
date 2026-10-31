@@ -21,6 +21,12 @@ case "$running" in
     *) echo "expected running status, got: $running" >&2; exit 1 ;;
 esac
 
+health=$($binary health)
+case "$health" in
+    *"Engine health: "*"Xruns since engine start"*"I/O buffering estimate"*) ;;
+    *) echo "expected engine health and latency details, got: $health" >&2; exit 1 ;;
+esac
+
 if $binary --engine >/dev/null 2>&1; then
     echo "expected duplicate engine process to fail" >&2
     exit 1

@@ -1,9 +1,13 @@
 #include "shatter/engine/audio_backend.hpp"
+#include "shatter/engine/health.hpp"
 
 #include <cerrno>
 #include <charconv>
+#include <cstdint>
 #include <cstring>
+#include <iomanip>
 #include <map>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <sys/types.h>
@@ -123,6 +127,7 @@ struct PlaybackStream {
 struct PlaybackSink {
     std::string name;
     std::string description;
+    std::optional<std::uint64_t> current_latency_usec;
 };
 
 bool read_playback_streams(std::vector<PlaybackStream>& streams, std::string& error)
@@ -187,6 +192,11 @@ bool read_playback_sinks(std::vector<PlaybackSink>& sinks, std::string& error)
             current.name = std::string(trim(value.substr(5)));
         } else if (value.starts_with("Description:")) {
             current.description = std::string(trim(value.substr(12)));
+        } else if (value.starts_with("Latency:")) {
+            const auto latency = trim(value.substr(8));
+            std::uint64_t usec = 0;
+            const auto [end, error] = std::from_chars(latency.data(), latency.data() + latency.size(), usec);
+            if (error == std::errc{} && end != latency.data()) current.current_latency_usec = usec;
         }
     }
     finish();
@@ -341,6 +351,40 @@ public:
     }
 
     std::string fader_status() const override { return unsupported_operation() + "\n"; }
+    std::string health_status() const override
+    {
+        std::vector<PlaybackSink> sinks;
+        std::string error;
+        const bool sinks_read = started_ && read_playback_sinks(sinks, error);
+        const auto state = health_state(started_, sinks_read && !sinks.empty(), 0);
+        std::ostringstream report;
+        report << std::fixed << std::setprecision(3);
+        report << "Engine health: " << health_state_name(state) << '\n';
+        if (!started_) report << "Reason: PulseAudio backend did not open successfully\n";
+        else if (!sinks_read) report << "Issue: could not inspect PulseAudio sinks: " << error << '\n';
+        else if (sinks.empty()) report << "Issue: no PulseAudio playback sinks are available\n";
+        else report << "Issue: none detected\n";
+
+        report << "Xruns since engine start: unavailable (PulseAudio backend has no Shatter ring buffers)\n";
+        if (!sinks.empty()) {
+            const PlaybackSink* measured_sink = nullptr;
+            for (const auto& sink : sinks) {
+                if (sink.current_latency_usec && (measured_sink == nullptr ||
+                    *sink.current_latency_usec > *measured_sink->current_latency_usec))
+                    measured_sink = &sink;
+            }
+            if (measured_sink != nullptr) {
+                report << "I/O latency: " << *measured_sink->current_latency_usec / 1000.0
+                       << " ms (current PulseAudio sink latency from `pactl list sinks`, sink "
+                       << measured_sink->name << ")\n";
+            } else {
+                report << "I/O latency: unavailable (pactl list sinks did not report a current sink latency)\n";
+            }
+        } else {
+            report << "I/O latency: unavailable (no playback sink is available to measure)\n";
+        }
+        return report.str();
+    }
     bool profile_start(std::string& error) override { return unsupported(error); }
     std::string profile_stop(std::string& error) override { error = unsupported_operation(); return {}; }
     bool available() const noexcept override { return started_; }

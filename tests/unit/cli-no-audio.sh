@@ -15,6 +15,12 @@ case "$status" in
     *) echo "expected clear no-audio status, got: $status" >&2; exit 1 ;;
 esac
 
+health=$($binary health)
+case "$health" in
+    *"Engine health: failed-open"*"no audio backend is configured"*"I/O latency: unavailable"*) ;;
+    *) echo "expected failed-open health details, got: $health" >&2; exit 1 ;;
+esac
+
 inputs=$("$binary" --list-in)
 case "$inputs" in
     *"no audio backend is configured"*) ;;

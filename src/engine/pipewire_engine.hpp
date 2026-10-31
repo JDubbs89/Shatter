@@ -2,6 +2,7 @@
 
 #include "shatter/engine/audio_backend.hpp"
 #include "shatter/engine/audio_ring.hpp"
+#include "shatter/engine/health.hpp"
 #include "shatter/engine/realtime_access_gate.hpp"
 #include "shatter/engine/runtime_profiler.hpp"
 #include "shatter/meter/meter_bus.hpp"
@@ -74,6 +75,7 @@ public:
     std::string list_outputs(std::size_t terminal_width = 100) const override;
     std::string list_meters(std::string_view selector = {}) const override;
     std::string fader_status() const override;
+    std::string health_status() const override;
     bool profile_start(std::string& error) override;
     std::string profile_stop(std::string& error) override;
     bool available() const noexcept override;
@@ -308,6 +310,8 @@ private:
     std::atomic<bool> output_linked_{false};
     float smoothed_gain_ = 1.0F;
     RuntimeProfiler profiler_;
+    XrunCounters xruns_;
+    std::array<std::atomic<std::uint64_t>, max_output_channels> latest_input_ring_frames_{};
     std::atomic<bool> shutdown_fade_requested_{false};
     std::atomic<bool> profile_running_{false};
     std::chrono::steady_clock::time_point profile_started_{};
