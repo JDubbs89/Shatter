@@ -94,6 +94,11 @@ case "$inputs" in
 esac
 
 "$binary" --set-capture-source "$source_selector"
+output_listing=$("$binary" --list-out)
+case "$output_listing" in
+    *"Available application input captures"*"No application input captures found"*) ;;
+    *) echo "Shatter's own capture stream was exposed as an assignable application input: $output_listing" >&2; exit 1 ;;
+esac
 "$binary" set fader capture capture -6
 fader_status=$("$binary" fader status)
 case "$fader_status" in

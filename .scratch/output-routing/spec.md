@@ -1,6 +1,6 @@
 # Named output channels and sends
 
-Shatter currently mixes every input into one PipeWire playback stream routed to one sink. Replace that single destination with named output channels that can each be routed to one or more physical PipeWire playback sinks. Input channels can send to named Shatter outputs; input assignment does not target physical sinks directly.
+Shatter currently mixes every input into one PipeWire playback stream routed to one sink. Replace that single destination with named output channels that can each be routed to one or more physical PipeWire playback sinks or application input captures. Input channels can send to named Shatter outputs; input assignment does not target external sinks directly.
 
 ## CLI
 
@@ -12,16 +12,16 @@ Shatter currently mixes every input into one PipeWire playback stream routed to 
 - `shatter unassign <app|capture|stream> <input-selector> <output-selector>` removes that send.
 - `shatter set default show <name>` selects the named show to load when the engine starts.
 
-Sink selectors include PipeWire node IDs and Shatter-generated IDs shown by output listing. Output selectors include the Shatter name and PipeWire node ID. Names and IDs must resolve unambiguously.
+Sink selectors include PipeWire node IDs and Shatter-generated IDs shown by output listing. Application input captures are discovered from PipeWire `Stream/Input/Audio` nodes and listed separately from physical playback devices and Shatter's own capture stream. Output selectors include the Shatter name and PipeWire node ID. Names and IDs must resolve unambiguously.
 
 ## Routing semantics
 
-- An output channel may route to multiple playback sinks, including speakers and headphones concurrently.
+- An output channel may route to multiple destinations, including speakers, headphones, and application input captures concurrently.
 - An input channel may send to multiple output channels; each send is independent.
 - App channels represent the post-stream-sum signal. A direct playback-stream send inherits its parent app channel's gain and mute, then applies that stream's gain and mute. Capture is an independent input channel.
 - Sends are additive: assigning both a playback stream and its parent app channel to the same output intentionally contributes both signals.
 - A built-in `speakers` output preserves current startup behavior: app channels are sent to it by default and it follows the system's default playback sink. Playback streams reach speakers through their parent app channel; direct playback-stream sends are off by default. Capture remains unsent by default. User-created outputs are additional destinations.
-- Configurations persist output channels, sink bindings, and sends. PipeWire node IDs are runtime selectors; persisted sink bindings use stable PipeWire device identity when available.
+- Configurations persist output channels, sink bindings, and sends. PipeWire node IDs are runtime selectors; physical sink bindings use stable PipeWire device identity when available, and application input bindings use application ID or process identity with the capture node name when available. Routes remain visibly reconnecting while their exact saved endpoint is absent.
 - Output creation, deletion, assignments, and config I/O run on the control thread. Realtime callbacks consume immutable/preallocated routing state and do not allocate, lock, or perform PipeWire graph operations.
 
 ## Implementation notes

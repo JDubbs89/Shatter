@@ -215,9 +215,13 @@ if(BUILD_TESTING)
             add_executable(pipewire_test_source tests/integration/pipewire-test-source.cpp)
             target_link_libraries(pipewire_test_source PRIVATE PkgConfig::PIPEWIRE)
             target_compile_features(pipewire_test_source PRIVATE cxx_std_20)
+            add_executable(pipewire_test_input tests/integration/pipewire-test-input.cpp)
+            target_link_libraries(pipewire_test_input PRIVATE PkgConfig::PIPEWIRE)
+            target_compile_features(pipewire_test_input PRIVATE cxx_std_20)
             add_test(
                 NAME app_playback_routing
-                COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/app-playback-routing.sh" "$<TARGET_FILE:shatter>"
+                COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/app-playback-routing.sh"
+                    "$<TARGET_FILE:shatter>" "$<TARGET_FILE:pipewire_test_input>"
             )
             add_test(
                 NAME microphone_capture_routing

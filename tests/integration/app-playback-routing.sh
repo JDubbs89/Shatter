@@ -2,6 +2,7 @@
 set -eu
 
 binary=$1
+input_probe_binary=$2
 test_root=$(mktemp -d /tmp/shatter-pw-integration.XXXXXX)
 runtime_dir="$test_root/runtime"
 config_dir="$test_root/config"
@@ -10,6 +11,7 @@ pipewire_pid=
 wireplumber_pid=
 engine_running=0
 playback_pids=
+input_probe_pid=
 
 cleanup()
 {
@@ -19,6 +21,7 @@ cleanup()
     for pid in $playback_pids; do
         kill "$pid" 2>/dev/null || true
     done
+    if [ -n "$input_probe_pid" ]; then kill "$input_probe_pid" 2>/dev/null || true; fi
     if [ -n "$wireplumber_pid" ]; then kill "$wireplumber_pid" 2>/dev/null || true; fi
     if [ -n "$pipewire_pid" ]; then kill "$pipewire_pid" 2>/dev/null || true; fi
     if [ -n "$wireplumber_pid" ]; then wait "$wireplumber_pid" 2>/dev/null || true; fi
@@ -61,6 +64,12 @@ sleep 0.5
 pw-cli create-node adapter '{ factory.name = support.null-audio-sink node.name = shatter-test-speakers node.description = "Shatter Test Speakers" media.class = Audio/Sink audio.position = [ FL FR ] object.linger = true }' >/dev/null
 pw-cli create-node adapter '{ factory.name = support.null-audio-sink node.name = shatter-test-anchor node.description = "Shatter Test Anchor" media.class = Audio/Sink audio.position = [ FL FR ] object.linger = true }' >/dev/null
 pw-cli create-node adapter '{ factory.name = support.null-audio-sink node.name = shatter-test-headphones node.description = "Shatter Test Headphones" device.serial = shatter-test-headphones-serial object.path = shatter-test-headphones-path media.class = Audio/Sink audio.position = [ FL FR ] object.linger = true }' >/dev/null
+pw-cli create-node adapter '{ factory.name = support.null-audio-sink node.name = shatter-test-discord-mic node.description = "Discord Microphone Input Capture" application.name = Discord application.id = com.discordapp.Discord media.class = Stream/Input/Audio audio.position = [ FL FR ] object.linger = true }' >/dev/null
+application_input_node_id=$(pw-cli ls Node | awk '/^[[:space:]]*id [0-9]+,/ { id=$2; sub(/,$/, "", id) } index($0, "node.name = \"shatter-test-discord-mic\"") { print id; exit }')
+if [ -z "$application_input_node_id" ]; then
+    echo "could not determine the mock application input node ID" >&2
+    exit 1
+fi
 sleep 0.3
 sink_id=$(wpctl status -n | awk '/shatter-test-speakers/ { for (i=1; i<=NF; ++i) if ($i ~ /^[0-9]+\.$/) { id=$i; sub(/\.$/, "", id); print id; exit } }')
 anchor_sink_id=$(wpctl status -n | awk '/shatter-test-anchor/ { for (i=1; i<=NF; ++i) if ($i ~ /^[0-9]+\.$/) { id=$i; sub(/\.$/, "", id); print id; exit } }')
@@ -305,6 +314,131 @@ anchor_device_id=$(listed_device_id shatter-test-anchor)
 headphones_device_id=$(listed_device_id shatter-test-headphones)
 "$binary" assign out "Headphone Monitor" "$headphones_device_id"
 "$binary" assign app "$app_a_id" "Headphone Monitor"
+application_input_listing=$("$binary" --list-out)
+application_input_id=$(printf '%s\n' "$application_input_listing" | awk -F'|' '/shatter-test-discord-mic/ { id=$2; gsub(/^[[:space:]]+|[[:space:]]+$/, "", id); print id; exit }')
+case "$application_input_listing" in
+    *"Available application input captures"*"Discord / shatter-test-discord-mic"*) ;;
+    *) echo "application microphone input was not listed as an output destination: $application_input_listing" >&2; exit 1 ;;
+esac
+if [ -z "$application_input_id" ]; then
+    echo "application microphone input did not receive an assignable ID: $application_input_listing" >&2
+    exit 1
+fi
+"$binary" assign out "Headphone Monitor" "$application_input_id"
+input_linked=0
+for attempt in $(seq 1 50); do
+    if pw-link -l | grep -A1 'shatter-test-discord-mic:input_FL' | grep -q 'shatter.output.1:output_FL'; then
+        input_linked=1
+        break
+    fi
+    sleep 0.1
+done
+if [ "$input_linked" -ne 1 ]; then
+    pw-link -l >&2
+    echo "output channel did not link to the application microphone input" >&2
+    exit 1
+fi
+probe_result="$test_root/application-input-rms.txt"
+"$input_probe_binary" shatter-test-audio-input "$probe_result" 2500 &
+input_probe_pid=$!
+probe_input_id=
+for attempt in $(seq 1 50); do
+    application_input_listing=$("$binary" --list-out)
+    probe_input_id=$(printf '%s\n' "$application_input_listing" | awk -F'|' '/shatter-test-audio-input/ { id=$2; gsub(/^[[:space:]]+|[[:space:]]+$/, "", id); print id; exit }')
+    if [ -n "$probe_input_id" ]; then break; fi
+    sleep 0.1
+done
+if [ -z "$probe_input_id" ]; then
+    echo "PipeWire input probe did not appear in the application capture list: $application_input_listing" >&2
+    exit 1
+fi
+"$binary" assign out "Headphone Monitor" "$probe_input_id"
+probe_linked=0
+for attempt in $(seq 1 50); do
+    if pw-link -l | grep -A1 'shatter-test-audio-input:input_FL' | grep -q 'shatter.output.1:output_FL'; then
+        probe_linked=1
+        break
+    fi
+    sleep 0.1
+done
+if [ "$probe_linked" -ne 1 ]; then
+    pw-link -l >&2
+    echo "output channel did not link to the audio-measuring application input" >&2
+    exit 1
+fi
+"$binary" save show application-input-identity-check
+grep -F 'app-input:Shatter Integration Probe:shatter-test-audio-input' \
+    "$XDG_CONFIG_HOME/shatter/application-input-identity-check.conf" >/dev/null || {
+    echo "application input config omitted its PipeWire application identity" >&2
+    cat "$XDG_CONFIG_HOME/shatter/application-input-identity-check.conf" >&2
+    exit 1
+}
+sleep 0.5
+"$binary" unassign out "Headphone Monitor" "$probe_input_id"
+wait "$input_probe_pid"
+input_probe_pid=
+probe_rms=$(cat "$probe_result")
+if ! awk -v rms="$probe_rms" 'BEGIN { exit !(rms + 0 >= 0.001) }'; then
+    echo "application input received no routed audio samples: RMS=$probe_rms" >&2
+    exit 1
+fi
+"$binary" save show application-input-route-check
+application_input_config="$XDG_CONFIG_HOME/shatter/application-input-route-check.conf"
+grep -F 'app-input:Discord:shatter-test-discord-mic' "$application_input_config" >/dev/null || {
+    echo "saved output config omitted the stable application input identity" >&2
+    cat "$application_input_config" >&2
+    exit 1
+}
+"$binary" unassign out "Headphone Monitor" "$application_input_id"
+if pw-link -l | grep -A1 'shatter-test-discord-mic:input_FL' | grep -q 'shatter.output.1:output_FL'; then
+    echo "unassigning the application input left its output link in place" >&2
+    exit 1
+fi
+"$binary" load show application-input-route-check
+restored_input_link=0
+for attempt in $(seq 1 50); do
+    if pw-link -l | grep -A1 'shatter-test-discord-mic:input_FL' | grep -q 'shatter.output.1:output_FL'; then
+        restored_input_link=1
+        break
+    fi
+    sleep 0.1
+done
+if [ "$restored_input_link" -ne 1 ]; then
+    pw-link -l >&2
+    echo "loading an output config did not restore its application input route" >&2
+    exit 1
+fi
+pw-cli destroy "$application_input_node_id" >/dev/null
+reconnecting_application_input=0
+for attempt in $(seq 1 50); do
+    output_listing=$("$binary" --list-out)
+    case "$output_listing" in
+        *"reconnecting"*) reconnecting_application_input=1; break ;;
+    esac
+    sleep 0.1
+done
+if [ "$reconnecting_application_input" -ne 1 ]; then
+    echo "removed application input was not reported as reconnecting: $output_listing" >&2
+    exit 1
+fi
+pw-cli create-node adapter '{ factory.name = support.null-audio-sink node.name = shatter-test-discord-mic node.description = "Discord Microphone Input Capture" application.name = Discord application.id = com.discordapp.Discord media.class = Stream/Input/Audio audio.position = [ FL FR ] object.linger = true }' >/dev/null
+reconnected_application_input=0
+for attempt in $(seq 1 50); do
+    output_listing=$("$binary" --list-out)
+    if printf '%s\n' "$output_listing" | grep -F "$application_input_id" | grep -q 'shatter-test-discord-mic'; then
+        if pw-link -l | grep -A1 'shatter-test-discord-mic:input_FL' | grep -q 'shatter.output.1:output_FL'; then
+            reconnected_application_input=1
+            break
+        fi
+    fi
+    sleep 0.1
+done
+if [ "$reconnected_application_input" -ne 1 ]; then
+    pw-link -l >&2
+    echo "recreated application input did not restore its stable output route: $output_listing" >&2
+    exit 1
+fi
+"$binary" unassign out "Headphone Monitor" "$application_input_id"
 "$binary" --set-gain stream "$stream_a_id" 0
 pw-cli destroy "$headphones_sink_id" >/dev/null
 reconnecting=0

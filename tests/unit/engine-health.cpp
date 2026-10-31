@@ -1,4 +1,5 @@
 #include "shatter/engine/health.hpp"
+#include "shatter/engine/identifiers.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -40,4 +41,16 @@ TEST_CASE("health state has stable user-facing names")
     CHECK(std::string(health_state_name(HealthState::running)) == "running");
     CHECK(std::string(health_state_name(HealthState::degraded)) == "degraded");
     CHECK(std::string(health_state_name(HealthState::failed_open)) == "failed-open");
+}
+
+TEST_CASE("application input capture identities include application and node")
+{
+    using shatter::engine::stable_application_input_identity;
+
+    const auto discord = stable_application_input_identity(
+        "com.discordapp.Discord", "discord", "Discord", "Discord Microphone Input Capture");
+    CHECK(discord == "app-input:com.discordapp.Discord:Discord Microphone Input Capture");
+    CHECK(discord != stable_application_input_identity(
+        "org.example.game", "game", "Game", "Discord Microphone Input Capture"));
+    CHECK(stable_application_input_identity({}, {}, {}, "capture") == "");
 }

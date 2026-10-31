@@ -82,7 +82,7 @@ void PipeWireEngine::on_global(void* data, std::uint32_t id, std::uint32_t,
         const auto sink = engine.nodes_.find(port.node_id);
         for (auto& output : engine.output_channels_)
             if (output.in_use && (output.node_id == port.node_id ||
-                (sink != engine.nodes_.end() && sink->second.media_class == "Audio/Sink")))
+                (sink != engine.nodes_.end() && PipeWireEngine::is_output_destination(sink->second))))
                 engine.restore_output_routes_locked(output);
         engine.refresh_output_link_locked();
         return;
@@ -97,7 +97,7 @@ void PipeWireEngine::on_global(void* data, std::uint32_t id, std::uint32_t,
     }
     const std::string_view media_class_view(media_class);
     if (media_class_view != "Audio/Sink" && media_class_view != "Audio/Source" &&
-        media_class_view != "Stream/Output/Audio") {
+        media_class_view != "Stream/Output/Audio" && media_class_view != "Stream/Input/Audio") {
         return;
     }
 
@@ -114,6 +114,9 @@ void PipeWireEngine::on_global(void* data, std::uint32_t id, std::uint32_t,
     if (const char* app_id = spa_dict_lookup(props, PW_KEY_APP_ID)) node.application_id = app_id;
     if (const char* binary = spa_dict_lookup(props, PW_KEY_APP_PROCESS_BINARY)) node.process_binary = binary;
 
+    if (media_class_view == "Stream/Input/Audio" &&
+        (node.application == "Shatter" || node.name == "shatter.capture.input")) return;
+
     if (media_class_view == "Stream/Output/Audio") {
         if (node.name == kSpeakerStreamName || node.application == "Shatter") {
             return;
@@ -125,7 +128,7 @@ void PipeWireEngine::on_global(void* data, std::uint32_t id, std::uint32_t,
     std::lock_guard lock(engine.nodes_mutex_);
     engine.nodes_[id] = std::move(node);
     const auto added = engine.nodes_.find(id);
-    if (added != engine.nodes_.end() && added->second.media_class == "Audio/Sink") {
+    if (added != engine.nodes_.end() && engine.is_output_destination(added->second)) {
         for (auto& output : engine.output_channels_)
             if (output.in_use) engine.restore_output_routes_locked(output);
     }
@@ -140,7 +143,7 @@ void PipeWireEngine::on_global_remove(void* data, std::uint32_t id)
     {
         std::lock_guard lock(engine.nodes_mutex_);
         const auto removed_node = engine.nodes_.find(id);
-        if (removed_node != engine.nodes_.end() && removed_node->second.media_class == "Audio/Sink") {
+        if (removed_node != engine.nodes_.end() && engine.is_output_destination(removed_node->second)) {
             for (auto& output : engine.output_channels_) {
                 if (!output.in_use) continue;
                 for (std::size_t i = 0; i < output.assigned_sink_count; ++i)

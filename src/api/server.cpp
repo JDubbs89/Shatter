@@ -217,7 +217,7 @@ int run_server()
                 if (!parsed_request || (parsed >> extra) || (!assign && !unassign))
                     reply = "ERR expected OUTPUT-DEVICE <output> <device>\n";
                 else if (audio_engine.assign_output_destination(output, device, assign, output_error))
-                    reply = std::string("OK output playback device ") + (assign ? "assigned\n" : "unassigned\n");
+                    reply = std::string("OK output destination ") + (assign ? "assigned\n" : "unassigned\n");
                 else reply = "ERR " + output_error + "\n";
             } else if (input.starts_with("APP-OUTPUT-")) {
                 std::istringstream parsed{std::string(input)};

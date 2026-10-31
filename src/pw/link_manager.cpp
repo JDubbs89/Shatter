@@ -36,8 +36,38 @@ void trace_output(const char* stage, const void* request, std::string_view detai
 }
 }
 
+bool PipeWireEngine::is_output_destination(const NodeInfo& node)
+{
+    return (node.media_class == "Audio/Sink" && !node.name.starts_with("shatter.stream.")) ||
+        node.media_class == "Stream/Input/Audio";
+}
+
+std::string PipeWireEngine::output_destination_name(const NodeInfo& node)
+{
+    return node.name.empty() ? node.description : node.name;
+}
+
+std::string PipeWireEngine::output_destination_identity(const NodeInfo& node)
+{
+    if (node.media_class == "Stream/Input/Audio") {
+        const std::string name = output_destination_name(node);
+        const auto identity = stable_application_input_identity(node.application_id, node.process_binary,
+                                                                 node.application, name);
+        return identity.empty() ? "app-input-runtime:" + name + ":" + std::to_string(node.node_id) : identity;
+    }
+    const std::string name = output_destination_name(node);
+    return stable_device_identity(node.device_identity, name);
+}
+
+std::string PipeWireEngine::output_destination_selector(const NodeInfo& node)
+{
+    const auto identity = output_destination_identity(node);
+    return make_stable_selector_id(node.media_class == "Stream/Input/Audio" ? "input" : "device", identity);
+}
+
 void PipeWireEngine::refresh_output_link_locked()
 {
+    bool speaker_playback_linked = false;
     for (auto& output : output_channels_) {
         output.linked.store(false, std::memory_order_relaxed);
         output.sink_count = 0;
@@ -45,17 +75,18 @@ void PipeWireEngine::refresh_output_link_locked()
     for (const auto& [link_id, link] : links_) {
         (void)link_id;
         const auto target = nodes_.find(link.input_node);
-        if (target == nodes_.end() || target->second.media_class != "Audio/Sink" ||
-            target->second.name.starts_with("shatter.stream.")) continue;
+        if (target == nodes_.end() || !is_output_destination(target->second)) continue;
         for (auto& output : output_channels_) {
             if (output.in_use && output.node_id == link.output_node) {
                 if (output.sink_count < output.sink_node_ids.size())
                     output.sink_node_ids[output.sink_count++] = link.input_node;
                 output.linked.store(true, std::memory_order_release);
+                if (&output == &output_channels_[0] && target->second.media_class == "Audio/Sink")
+                    speaker_playback_linked = true;
             }
         }
     }
-    output_linked_.store(output_channels_[0].linked.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    output_linked_.store(speaker_playback_linked, std::memory_order_relaxed);
 }
 
 bool PipeWireEngine::make_output(std::string name, std::string& error)
@@ -385,7 +416,7 @@ bool PipeWireEngine::apply_config_locked(state::Show show, std::string& error)
             for (const auto& [node_id, node] : nodes_) {
                 (void)node_id;
                 if (node.media_class != "Audio/Source") continue;
-                const std::string name = node.name.empty() ? node.description : node.name;
+                const std::string name = output_destination_name(node);
                 if (stable_device_identity(node.device_identity, name) != loaded_show_.capture_source_identity)
                     continue;
                 selector = make_stable_selector_id("source", loaded_show_.capture_source_identity);
@@ -432,9 +463,9 @@ void PipeWireEngine::restore_output_routes_locked(OutputChannel& output)
         NodeInfo* match = nullptr;
         for (auto& [node_id, sink] : nodes_) {
             (void)node_id;
-            if (sink.media_class != "Audio/Sink" || sink.name.starts_with("shatter.stream.")) continue;
-            const std::string sink_name = sink.name.empty() ? sink.description : sink.name;
-            const std::string identity = stable_device_identity(sink.device_identity, sink_name);
+            if (!is_output_destination(sink)) continue;
+            const std::string sink_name = output_destination_name(sink);
+            const std::string identity = output_destination_identity(sink);
             const bool same_identity = !pending[index].identity.empty() &&
                 (pending[index].identity == sink.device_identity || pending[index].identity == identity);
             const bool fallback_name = pending[index].identity.empty() && pending[index].name == sink_name;
@@ -453,8 +484,7 @@ void PipeWireEngine::restore_output_routes_locked(OutputChannel& output)
             continue;
         std::string route_error;
         const std::string sink_name = match->name.empty() ? match->description : match->name;
-        const std::string sink_selector = make_stable_selector_id("device",
-            stable_device_identity(match->device_identity, sink_name));
+        const std::string sink_selector = output_destination_selector(*match);
         if (assign_output_sink_locked(output.name, sink_selector, true, route_error)) matched[index] = true;
     }
     for (std::size_t index = 0; index < pending.size() && output.assigned_sink_count < output.assigned_sink_node_ids.size(); ++index) {
@@ -542,19 +572,19 @@ bool PipeWireEngine::assign_output_sink_locked(std::string_view output_selector,
     NodeInfo* sink = nullptr;
     for (auto& [id, node] : nodes_) {
         (void)id;
-        if (node.media_class != "Audio/Sink" || node.name.starts_with("shatter.stream.")) continue;
-        const std::string name = node.name.empty() ? node.description : node.name;
-        const std::string identity = stable_device_identity(node.device_identity, name);
-        const bool stable_match = make_stable_selector_id("device", identity) == sink_selector;
+        if (!is_output_destination(node)) continue;
+        const std::string name = output_destination_name(node);
+        const bool stable_match = output_destination_selector(node) == sink_selector;
         const bool name_match = node.name == sink_selector || node.description == sink_selector;
         if (!stable_match && !name_match) continue;
         if (sink != nullptr) {
-            error = "playback device selector is ambiguous; use its listed device ID";
+            error = "output destination selector is ambiguous; use its listed ID";
             return false;
         }
         sink = &node;
     }
-    if (sink == nullptr) { error = "unknown playback device: " + std::string(sink_selector); return false; }
+    if (sink == nullptr) { error = "unknown output destination: " + std::string(sink_selector); return false; }
+    const std::string identity = output_destination_identity(*sink);
     auto route_it = std::find(output->assigned_sink_node_ids.begin(),
                               output->assigned_sink_node_ids.begin() + output->assigned_sink_count,
                               sink->node_id);
@@ -628,7 +658,7 @@ bool PipeWireEngine::assign_output_sink_locked(std::string_view output_selector,
         return true;
     }
 
-    if (output->assigned_sink_count == 0) {
+    if (output->assigned_sink_count == 0 && sink->media_class == "Audio/Sink") {
         pw_properties* properties = pw_properties_new(PW_KEY_NODE_AUTOCONNECT, "true", nullptr);
         if (properties == nullptr) { error = "could not allocate output routing properties"; return false; }
         const int property_result = pw_stream_update_properties(output->stream, &properties->dict);
@@ -639,8 +669,8 @@ bool PipeWireEngine::assign_output_sink_locked(std::string_view output_selector,
             return false;
         }
         output->assigned_sink_node_ids[0] = sink->node_id;
-        output->assigned_sink_names[0] = sink->name;
-        output->assigned_sink_identities[0] = sink->device_identity;
+        output->assigned_sink_names[0] = output_destination_name(*sink);
+        output->assigned_sink_identities[0] = identity;
         output->assigned_sink_count = 1;
         return true;
     }
@@ -746,11 +776,11 @@ bool PipeWireEngine::assign_output_sink_locked(std::string_view output_selector,
         managed_links_.push_back({output->node_id, created_link_sinks[i], created_links[i]});
     if (placeholder_index < output->assigned_sink_count) {
         output->assigned_sink_node_ids[placeholder_index] = sink->node_id;
-        output->assigned_sink_identities[placeholder_index] = sink->device_identity;
+        output->assigned_sink_identities[placeholder_index] = identity;
     } else {
         output->assigned_sink_node_ids[output->assigned_sink_count] = sink->node_id;
-        output->assigned_sink_names[output->assigned_sink_count] = sink->name;
-        output->assigned_sink_identities[output->assigned_sink_count] = sink->device_identity;
+        output->assigned_sink_names[output->assigned_sink_count] = output_destination_name(*sink);
+        output->assigned_sink_identities[output->assigned_sink_count] = identity;
         ++output->assigned_sink_count;
     }
     return true;

@@ -251,6 +251,10 @@ private:
     bool apply_config_locked(state::Show show, std::string& error);
     std::uint32_t output_mask_for_identities(const std::vector<std::string>& identities) const;
     void restore_output_routes_locked(OutputChannel& output);
+    static bool is_output_destination(const NodeInfo& node);
+    static std::string output_destination_name(const NodeInfo& node);
+    static std::string output_destination_identity(const NodeInfo& node);
+    static std::string output_destination_selector(const NodeInfo& node);
     bool assign_output_sink_locked(std::string_view output_selector, std::string_view sink_selector,
                                    bool assigned, std::string& error);
     bool assign_app_output_locked(std::string_view app_selector, std::string_view output_selector,

@@ -555,8 +555,9 @@ bool PipeWireEngine::save_config(std::string_view name, std::string& error)
             setting.muted = output.muted.load(std::memory_order_relaxed);
             for (std::size_t sink = 0; sink < output.assigned_sink_count; ++sink) {
                 if (output.assigned_sink_names[sink].empty()) continue;
-                setting.devices.push_back({stable_device_identity(
-                    output.assigned_sink_identities[sink], output.assigned_sink_names[sink]),
+                const auto& identity = output.assigned_sink_identities[sink];
+                setting.devices.push_back({identity.starts_with("app-input") ? identity :
+                    stable_device_identity(identity, output.assigned_sink_names[sink]),
                     output.assigned_sink_names[sink]});
             }
             show.outputs.push_back(std::move(setting));
@@ -736,12 +737,13 @@ std::string PipeWireEngine::list_outputs(std::size_t) const
             } else {
                 const auto target = nodes_.find(sink_id);
                 if (target == nodes_.end()) {
-                    route = fit_column(output.assigned_sink_names[i], 20) + " (reconnecting)";
+                    const bool app_input = output.assigned_sink_identities[i].starts_with("app-input");
+                    route = fit_column(output.assigned_sink_names[i], 20) +
+                        (app_input ? " [input] (reconnecting)" : " (reconnecting)");
                 } else {
-                    const std::string& sink_name = target->second.name.empty()
-                        ? target->second.description : target->second.name;
-                    route = make_stable_selector_id("device", stable_device_identity(
-                        target->second.device_identity, sink_name)) + " (" + fit_column(sink_name, 12) + ")";
+                    const std::string sink_name = output_destination_name(target->second);
+                    route = output_destination_selector(target->second) + " (" + fit_column(sink_name, 12) + ")";
+                    if (target->second.media_class == "Stream/Input/Audio") route += " [input]";
                 }
             }
             output_rows.push_back({output_name, output_identity, format_gain(output.target_gain.load()),
@@ -753,11 +755,13 @@ std::string PipeWireEngine::list_outputs(std::size_t) const
                 const auto sink_id = output.sink_node_ids[i];
                 const auto target = nodes_.find(sink_id);
                 if (target == nodes_.end()) continue;
-                const std::string& sink_name = target->second.name.empty() ? target->second.description : target->second.name;
+                const std::string sink_name = output_destination_name(target->second);
+                std::string destination = output_destination_selector(target->second) +
+                    " (" + fit_column(sink_name, 12) + ")";
+                if (target->second.media_class == "Stream/Input/Audio") destination += " [input]";
                 output_rows.push_back({output_name, output_identity,
                     format_gain(output.target_gain.load()), output.muted.load() ? "yes" : "no",
-                    make_stable_selector_id("device", stable_device_identity(target->second.device_identity, sink_name)) +
-                        " (" + fit_column(sink_name, 12) + ")"});
+                    std::move(destination)});
                 has_route = true;
             }
         }
@@ -765,7 +769,7 @@ std::string PipeWireEngine::list_outputs(std::size_t) const
             format_gain(output.target_gain.load()), output.muted.load() ? "yes" : "no", "not assigned"});
     }
     if (output_rows.empty()) output_rows.push_back({"-", "-", "-", "-", "No output channels"});
-    append_table(table, {"Output channel", "Output identity", "Gain", "Mute", "Assigned playback devices"},
+    append_table(table, {"Output channel", "Output identity", "Gain", "Mute", "Assigned destinations"},
         output_rows, {24, 24, 8, 5, 40});
 
     std::vector<NodeInfo> playback_sinks;
@@ -780,7 +784,7 @@ std::string PipeWireEngine::list_outputs(std::size_t) const
     });
     std::vector<TableRow> sink_rows;
     for (const auto& node : playback_sinks) {
-        const std::string name = node.name.empty() ? node.description : node.name;
+        const std::string name = output_destination_name(node);
         sink_rows.push_back({make_stable_selector_id("device", stable_device_identity(node.device_identity, name)), name});
     }
     if (playback_sinks.empty()) {
@@ -788,6 +792,26 @@ std::string PipeWireEngine::list_outputs(std::size_t) const
     }
     table << "\nAvailable playback devices\n";
     append_table(table, {"Playback device ID", "Name"}, sink_rows, {24, 54});
+
+    std::vector<NodeInfo> application_inputs;
+    for (const auto& [id, node] : nodes_) {
+        (void)id;
+        if (node.media_class == "Stream/Input/Audio") application_inputs.push_back(node);
+    }
+    std::sort(application_inputs.begin(), application_inputs.end(), [](const NodeInfo& left, const NodeInfo& right) {
+        if (left.application != right.application) return left.application < right.application;
+        return left.name < right.name;
+    });
+    std::vector<TableRow> input_rows;
+    for (const auto& node : application_inputs) {
+        const std::string name = output_destination_name(node);
+        const std::string application = node.application.empty() ? node.application_id : node.application;
+        input_rows.push_back({output_destination_selector(node),
+            (application.empty() ? std::string{} : application + " / ") + name});
+    }
+    if (input_rows.empty()) input_rows.push_back({"-", "No application input captures found"});
+    table << "\nAvailable application input captures\n";
+    append_table(table, {"Application input ID", "Application / capture"}, input_rows, {24, 54});
     return table.str();
 }
 
@@ -1285,11 +1309,10 @@ bool PipeWireEngine::sink_binding_matches(const OutputChannel& output, std::size
                                           const NodeInfo& sink) const
 {
     const std::string& identity = output.assigned_sink_identities[index];
-    const std::string name = sink.name.empty() ? sink.description : sink.name;
-    const std::string stable_identity = stable_device_identity(sink.device_identity, name);
+    const std::string name = output_destination_name(sink);
+    const std::string stable_identity = output_destination_identity(sink);
     return (!identity.empty() && (identity == sink.device_identity || identity == stable_identity)) ||
-        ((identity.empty() || sink.device_identity.empty()) &&
-         output.assigned_sink_names[index] == name);
+        (identity.empty() && output.assigned_sink_names[index] == name);
 }
 
 void PipeWireEngine::run_loop()
