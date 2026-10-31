@@ -1,79 +1,31 @@
 #include "shatter/api/server.hpp"
 #include "shatter/engine/audio_backend.hpp"
+#include "shatter/platform/platform.hpp"
 
-#include <array>
-#include <cerrno>
 #include <charconv>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
-#include <cstring>
-#include <fcntl.h>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
-#include <stdexcept>
 #include <string>
 #include <string_view>
-#include <sys/socket.h>
-#include <sys/stat.h>
-#include <sys/time.h>
-#include <sys/types.h>
-#include <sys/un.h>
 #include <thread>
+#if !defined(_WIN32)
+#include <fcntl.h>
 #include <unistd.h>
+#endif
 
 namespace shatter::api {
 namespace {
 
-std::string prepare_control_socket_path()
-{
-    const char* runtime_dir = std::getenv("XDG_RUNTIME_DIR");
-    if (runtime_dir == nullptr || *runtime_dir == '\0') {
-        throw std::runtime_error("XDG_RUNTIME_DIR is not set");
-    }
-
-    const std::string directory = std::string(runtime_dir) + "/shatter";
-    const std::string path = directory + "/control.sock";
-    if (path.size() >= sizeof(sockaddr_un{}.sun_path)) {
-        throw std::runtime_error("XDG_RUNTIME_DIR path is too long for a Unix socket");
-    }
-
-    if (mkdir(directory.c_str(), 0700) < 0 && errno != EEXIST) {
-        throw std::runtime_error("cannot create runtime directory: " + std::string(std::strerror(errno)));
-    }
-
-    struct stat info {};
-    if (lstat(directory.c_str(), &info) < 0 || !S_ISDIR(info.st_mode) || info.st_uid != getuid() ||
-        (info.st_mode & 0077) != 0) {
-        throw std::runtime_error("runtime directory must be a private directory owned by the current user");
-    }
-
-    return path;
-}
-
-int connect_to_engine(const std::string& path)
-{
-    const int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
-    if (fd < 0) {
-        throw std::runtime_error("cannot create control socket: " + std::string(std::strerror(errno)));
-    }
-
-    struct sockaddr_un address {};
-    address.sun_family = AF_UNIX;
-    std::strncpy(address.sun_path, path.c_str(), sizeof(address.sun_path) - 1);
-    if (connect(fd, reinterpret_cast<const struct sockaddr*>(&address), sizeof(address)) < 0) {
-        const int error = errno;
-        close(fd);
-        errno = error;
-        return -1;
-    }
-
-    return fd;
-}
-
 void trace_output_command(std::string_view stage, std::string_view detail)
 {
+#if defined(_WIN32)
+    (void)stage;
+    (void)detail;
+#else
     if (std::getenv("SHATTER_TRACE_OUTPUT") == nullptr) return;
     const char* path = std::getenv("SHATTER_TRACE_OUTPUT_FILE");
     if (path == nullptr || *path == '\0') path = "/tmp/shatter-output-trace.log";
@@ -82,73 +34,23 @@ void trace_output_command(std::string_view stage, std::string_view detail)
     dprintf(fd, "[output-trace] pid=%ld stage=%.*s detail=%.*s\n", static_cast<long>(getpid()),
             static_cast<int>(stage.size()), stage.data(), static_cast<int>(detail.size()), detail.data());
     ::close(fd);
+#endif
 }
 
 } // namespace
 
 std::string request(std::string_view command)
 {
-    const int fd = connect_to_engine(prepare_control_socket_path());
-    if (fd < 0) {
-        return {};
-    }
-
-    const timeval timeout{1, 0};
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
-
-    const std::string message = std::string(command) + "\n";
-    std::size_t sent = 0;
-    while (sent < message.size()) {
-        const ssize_t result = send(fd, message.data() + sent, message.size() - sent, MSG_NOSIGNAL);
-        if (result <= 0) {
-            close(fd);
-            return {};
-        }
-        sent += static_cast<std::size_t>(result);
-    }
-
-    std::string response;
-    std::array<char, 4096> buffer{};
-    while (response.size() < 65536) {
-        const ssize_t received = recv(fd, buffer.data(), buffer.size(), 0);
-        if (received <= 0) {
-            break;
-        }
-        response.append(buffer.data(), static_cast<std::size_t>(received));
-        if (response.ends_with(".\n")) {
-            response.resize(response.size() - 2);
-            break;
-        }
-    }
-    close(fd);
-    return response;
+    return shatter::platform::request_control(command);
 }
 
 int run_server()
 {
-    const std::string path = prepare_control_socket_path();
-    struct stat existing {};
-    if (lstat(path.c_str(), &existing) == 0) {
-        if (!S_ISSOCK(existing.st_mode) || existing.st_uid != getuid()) {
-            std::cerr << "Refusing to replace an unexpected control socket path.\n";
-            return 1;
-        }
-
-        const int active_fd = connect_to_engine(path);
-        if (active_fd >= 0) {
-            close(active_fd);
-            std::cerr << "A Shatter engine is already listening.\n";
-            return 1;
-        }
-        if (errno != ECONNREFUSED && errno != ENOENT) {
-            std::cerr << "Could not verify existing control socket: " << std::strerror(errno) << '\n';
-            return 1;
-        }
-        if (unlink(path.c_str()) < 0) {
-            std::cerr << "Could not remove stale control socket: " << std::strerror(errno) << '\n';
-            return 1;
-        }
+    std::string transport_error;
+    auto control_server = shatter::platform::listen_for_control(transport_error);
+    if (!control_server) {
+        std::cerr << "Shatter control transport: " << transport_error << '\n';
+        return 1;
     }
 
     auto audio_backend = shatter::engine::create_audio_backend();
@@ -159,41 +61,19 @@ int run_server()
     std::string default_config_error;
     const bool startup_show_loaded = audio_engine.load_default_config(startup_show, default_config_error);
 
-    const int server_fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
-    if (server_fd < 0) {
-        std::cerr << "Could not create control socket: " << std::strerror(errno) << '\n';
-        return 1;
-    }
-
-    struct sockaddr_un address {};
-    address.sun_family = AF_UNIX;
-    std::strncpy(address.sun_path, path.c_str(), sizeof(address.sun_path) - 1);
-    if (bind(server_fd, reinterpret_cast<const struct sockaddr*>(&address), sizeof(address)) < 0 ||
-        chmod(path.c_str(), 0600) < 0 || listen(server_fd, 8) < 0) {
-        std::cerr << "Could not listen on control socket: " << std::strerror(errno) << '\n';
-        close(server_fd);
-        unlink(path.c_str());
-        return 1;
-    }
-
     bool running = true;
     while (running) {
-        const int client_fd = accept4(server_fd, nullptr, nullptr, SOCK_CLOEXEC);
-        if (client_fd < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
+        auto connection = control_server->accept(transport_error);
+        if (!connection) {
+            if (!transport_error.empty())
+                std::cerr << "Shatter control transport stopped: " << transport_error << '\n';
             break;
         }
-
-        std::array<char, 512> command{};
-        const ssize_t received = recv(client_fd, command.data(), command.size() - 1, 0);
+        std::string command;
+        const bool received = connection->receive(command, transport_error);
         std::string reply = "ERR invalid command\n";
-        if (received > 0) {
-            std::string_view input(command.data(), static_cast<std::size_t>(received));
-            if (!input.empty() && input.back() == '\n') {
-                input.remove_suffix(1);
-            }
+        if (received) {
+            const std::string_view input(command);
             if (input.starts_with("OUTPUT-") || input.starts_with("APP-OUTPUT-"))
                 trace_output_command("server.command", input);
             if (input == "PING") {
@@ -457,23 +337,12 @@ int run_server()
                 }
             }
         }
-        if (received > 0 && (std::string_view(command.data()).starts_with("OUTPUT-") ||
-                             std::string_view(command.data()).starts_with("APP-OUTPUT-")))
+        if (received && (command.starts_with("OUTPUT-") || command.starts_with("APP-OUTPUT-")))
             trace_output_command("server.reply", reply);
         reply += ".\n";
-        std::size_t sent = 0;
-        while (sent < reply.size()) {
-            const ssize_t result = send(client_fd, reply.data() + sent, reply.size() - sent, MSG_NOSIGNAL);
-            if (result <= 0) {
-                break;
-            }
-            sent += static_cast<std::size_t>(result);
-        }
-        close(client_fd);
+        std::string send_error;
+        connection->send(reply, send_error);
     }
-
-    close(server_fd);
-    unlink(path.c_str());
     return running ? 1 : 0;
 }
 

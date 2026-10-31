@@ -1,29 +1,19 @@
 #include "shatter/app/supervisor.hpp"
 #include "shatter/api/server.hpp"
+#include "shatter/platform/platform.hpp"
 #include "shatter/state/store.hpp"
 
-#include <array>
-#include <cerrno>
 #include <charconv>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
-#include <cstring>
-#include <fcntl.h>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <sys/socket.h>
-#include <sys/ioctl.h>
-#include <sys/stat.h>
-#include <sys/time.h>
-#include <sys/types.h>
-#include <sys/un.h>
 #include <thread>
-#include <unistd.h>
 #include <vector>
 
 namespace shatter::app {
@@ -75,29 +65,10 @@ int start_engine(const char* executable)
         return 0;
     }
 
-    const pid_t child = fork();
-    if (child < 0) {
-        std::cerr << "Could not start Shatter engine: " << std::strerror(errno) << '\n';
+    std::string launch_error;
+    if (!shatter::platform::launch_detached_engine(executable, launch_error)) {
+        std::cerr << "Could not start Shatter engine: " << launch_error << '\n';
         return 1;
-    }
-    if (child == 0) {
-        if (setsid() < 0) {
-            _exit(126);
-        }
-
-        const int null_fd = open("/dev/null", O_RDWR);
-        if (null_fd >= 0) {
-            dup2(null_fd, STDIN_FILENO);
-            dup2(null_fd, STDOUT_FILENO);
-            dup2(null_fd, STDERR_FILENO);
-            if (null_fd > STDERR_FILENO) {
-                close(null_fd);
-            }
-        }
-
-        char* const arguments[] = {const_cast<char*>(executable), const_cast<char*>(kEngineArgument.data()), nullptr};
-        execvp(executable, arguments);
-        _exit(127);
     }
 
     for (int attempt = 0; attempt < 400; ++attempt) {
@@ -108,7 +79,7 @@ int start_engine(const char* executable)
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
 
-    std::cerr << "Shatter engine did not become ready. Check that XDG_RUNTIME_DIR is available.\n";
+    std::cerr << "Shatter engine did not become ready. Check that its control transport can start.\n";
     return 1;
 }
 
@@ -304,9 +275,7 @@ int run_cli(int argc, char** argv)
             if (command == "--fader-status") {
                 request_command = "FADER-STATUS";
             } else if (command == "--list-in" || command == "--list-out" || command == "--list-all") {
-                struct winsize size{};
-                const unsigned short width = ioctl(STDOUT_FILENO, TIOCGWINSZ, &size) == 0 && size.ws_col > 0
-                    ? size.ws_col : 100;
+                const unsigned short width = shatter::platform::terminal_width();
                 const std::string_view list_command = command == "--list-in" ? "LIST-IN "
                     : command == "--list-out" ? "LIST-OUT " : "LIST-ALL ";
                 dynamic_command = std::string(list_command) + std::to_string(width);

@@ -6,7 +6,7 @@ This map distinguishes active implementations from planned modules. Active modul
 
 - `src/main.cpp`: executable entry point.
 - `src/app/supervisor.cpp`: command-line syntax, engine process lifecycle, and user-facing command output.
-- `src/api/server.cpp`: local Unix-socket command server and client request transport. The command protocol is private to the executable; a versioned JSON-RPC API remains planned.
+- `src/api/server.cpp`: local command dispatch and protocol handling. `src/platform/` owns the platform-specific control transport; the command protocol is private to the executable, and a versioned JSON-RPC API remains planned.
 - `src/api/osc.cpp`: optional P1 OSC control surface.
 - `src/control/midi.cpp`: optional P1 MIDI and hotkey control.
 
@@ -38,7 +38,7 @@ This map distinguishes active implementations from planned modules. Active modul
 1. Move channel state and list presentation behind explicit engine data interfaces; keep config file parsing and serialization in `state::Store`.
 2. Move capture endpoint lifecycle and route reconciliation behind explicit interfaces; current PipeWire graph callbacks and output management live under `src/pw`.
 3. Move reusable audio mixing math from the PipeWire callbacks into `dsp.cpp`, leaving buffer acquisition and release in `mixer_node.cpp`.
-4. Keep CLI parsing in `supervisor.cpp` and command dispatch/transport in `api/server.cpp`; avoid adding persistence or file-format logic back to either module.
+4. Keep CLI parsing in `supervisor.cpp`, command dispatch in `api/server.cpp`, and platform lifecycle/control transport in `src/platform/`; avoid adding persistence or file-format logic back to either module.
 
 ## Early proof points
 

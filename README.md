@@ -1,6 +1,6 @@
 # Shatter
 
-A single-user Linux desktop mixer daemon for persistent application and device routing. The initial target is Fedora with PipeWire; JACK applications are in scope when running through PipeWire's JACK compatibility layer.
+A single-user desktop mixer daemon for persistent application and device routing. Linux with PipeWire is the supported audio target. Windows builds can run the command server and lifecycle with audio explicitly unavailable while a native audio backend is developed.
 
 ## Project status
 
@@ -15,24 +15,34 @@ This repository is an early prototype. Shatter groups PipeWire playback streams 
 
 ## Build
 
-The build requires CMake, a C++20 compiler, pkg-config, and PipeWire development headers. On Fedora, install the PipeWire headers with `sudo dnf install pipewire-devel`.
+The Linux PipeWire build requires CMake, a C++20 compiler, pkg-config, and PipeWire development headers. On Fedora, install the PipeWire headers with `sudo dnf install pipewire-devel`.
 
 ```sh
 cmake -S . -B build
 cmake --build build
 ```
 
-The executable can start without a PipeWire session, but audio routing requires PipeWire and WirePlumber to be running for the current user.
+The platform and audio backend are selected independently with `SHATTER_PLATFORM` and `SHATTER_AUDIO_BACKEND`. Linux defaults to the PipeWire backend. Windows defaults to `NONE` and does not require PipeWire; audio commands report that no backend is configured. PipeWire is currently supported only on Linux.
+
+```powershell
+cmake -S . -B build -DSHATTER_PLATFORM=WINDOWS -DSHATTER_AUDIO_BACKEND=NONE `
+  -DCMAKE_INSTALL_PREFIX="$env:LOCALAPPDATA/Programs/Shatter"
+cmake --build build --config Release
+```
+
+Linux may also build the control service without an audio backend using `-DSHATTER_AUDIO_BACKEND=NONE`. A PipeWire session and WirePlumber are required for Linux audio routing.
 
 ## Install the local command
 
-Run the repository install script to build and install `shatter` into `~/.local/bin`:
+On Linux, run the repository install script to build and install `shatter` into `~/.local/bin`:
 
 ```sh
 sh install.sh
 ```
 
-The background engine discovers application playback streams and assigns each stream to a per-application channel. Use `shatter list in` to find app names, channel IDs, and stream IDs. Gain and mute accept either the current user-facing name or the corresponding ID. Rename an app channel or stream to set a display alias; this does not change app grouping or audio processing. Names must match exactly; if a name is ambiguous, use the listed Shatter ID. Stream selectors identify currently active streams and can change after a restart. Quote names that contain spaces.
+On Windows, configure and build with CMake as shown above, then install with `cmake --install build --config Release`.
+
+With the Linux PipeWire backend, the background engine discovers application playback streams and assigns each stream to a per-application channel. Use `shatter list in` to find app names, channel IDs, and stream IDs. Gain and mute accept either the current user-facing name or the corresponding ID. Rename an app channel or stream to set a display alias; this does not change app grouping or audio processing. Names must match exactly; if a name is ambiguous, use the listed Shatter ID. Stream selectors identify currently active streams and can change after a restart. Quote names that contain spaces.
 
 ```sh
 shatter start
@@ -74,4 +84,4 @@ The older dash-prefixed command forms remain accepted as compatibility aliases.
 
 Profiling requires the engine's PipeWire output to be ready. The stop command prints callback timing percentiles, callback budget overruns, process CPU time, dropped and unfilled ring-buffer frames, Shatter input ring occupancy, and PipeWire's reported device delay and queued audio. Unfilled ring frames can include idle or silent streams. Callback timing measures Shatter's processing work; ring occupancy, PipeWire delay, and queued audio are separate parts of the audio path, and this summary is not an end-to-end loopback latency measurement.
 
-Gain controls range from -60 dB to +12 dB and are smoothed during playback. The capture channel's speaker send starts off and resets to off whenever its source is changed or removed. The engine creates one virtual PipeWire ingress sink for each playback stream and returns streams to ordinary PipeWire routing when stopped. Its control socket lives in `$XDG_RUNTIME_DIR/shatter/control.sock` and is accessible only to the current user.
+Gain controls range from -60 dB to +12 dB and are smoothed during playback. The capture channel's speaker send starts off and resets to off whenever its source is changed or removed. The engine creates one virtual PipeWire ingress sink for each playback stream and returns streams to ordinary PipeWire routing when stopped. On Linux, the control socket lives in `$XDG_RUNTIME_DIR/shatter/control.sock` and is accessible only to the current user. Windows uses a current-user named pipe.

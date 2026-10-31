@@ -21,6 +21,16 @@ case "$running" in
     *) echo "expected running status, got: $running" >&2; exit 1 ;;
 esac
 
+if $binary --engine >/dev/null 2>&1; then
+    echo "expected duplicate engine process to fail" >&2
+    exit 1
+fi
+running=$($binary status)
+case "$running" in
+    *"is running"*) ;;
+    *) echo "duplicate start disrupted the active engine: $running" >&2; exit 1 ;;
+esac
+
 inputs=$($binary --list-in)
 case "$inputs" in
     *"Shatter inputs"*"No app streams discovered"*) ;;

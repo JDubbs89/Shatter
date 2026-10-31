@@ -33,11 +33,18 @@ Store::Store(std::filesystem::path directory)
 
 std::filesystem::path Store::config_path(std::string_view name) const
 {
-    const char* base = std::getenv("XDG_CONFIG_HOME");
     std::filesystem::path directory = directory_;
     if (directory.empty()) {
+#if defined(_WIN32)
+        const char* app_data = std::getenv("APPDATA");
+        if (app_data == nullptr || *app_data == '\0')
+            throw std::runtime_error("APPDATA is not set; cannot locate Shatter's configuration directory");
+        directory = std::filesystem::path(app_data) / "Shatter";
+#else
+        const char* base = std::getenv("XDG_CONFIG_HOME");
         directory = base && *base ? std::filesystem::path(base) / "shatter"
             : std::filesystem::path(std::getenv("HOME") ? std::getenv("HOME") : ".") / ".config" / "shatter";
+#endif
     }
 
     std::string filename(name);
