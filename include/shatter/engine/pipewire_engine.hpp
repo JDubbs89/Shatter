@@ -242,6 +242,7 @@ private:
     AppChannel* resolve_channel_locked(std::string_view selector, std::string& error);
     PlaybackStream* resolve_stream_locked(std::string_view selector, std::string& error);
     std::string playback_route_key(std::string_view app_identity, std::string_view original_name) const;
+    bool sink_binding_matches(const OutputChannel& output, std::size_t index, const NodeInfo& sink) const;
     void run_loop();
     void cleanup();
 

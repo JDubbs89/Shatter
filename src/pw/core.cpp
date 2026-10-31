@@ -84,11 +84,7 @@ void PipeWireEngine::on_global(void* data, std::uint32_t id, std::uint32_t,
                 bool pending = false;
                 for (std::size_t i = 0; i < output.assigned_sink_count; ++i)
                     if (output.assigned_sink_node_ids[i] == PW_ID_ANY &&
-                        ((!output.assigned_sink_identities[i].empty() &&
-                          output.assigned_sink_identities[i] == sink->second.device_identity) ||
-                         ((output.assigned_sink_identities[i].empty() ||
-                           sink->second.device_identity.empty()) &&
-                          output.assigned_sink_names[i] == sink->second.name))) pending = true;
+                        engine.sink_binding_matches(output, i, sink->second)) pending = true;
                 if (pending) {
                     std::string route_error;
                     engine.assign_output_sink_locked(output.name, sink->second.name, true, route_error);
@@ -149,10 +145,7 @@ void PipeWireEngine::on_global(void* data, std::uint32_t id, std::uint32_t,
                 bool matching_route = false;
                 for (std::size_t index = 0; index < output.assigned_sink_count; ++index) {
                     if (output.assigned_sink_node_ids[index] != PW_ID_ANY) continue;
-                    const auto& identity = output.assigned_sink_identities[index];
-                    matching_route = (!identity.empty() && identity == added->second.device_identity) ||
-                        ((identity.empty() || added->second.device_identity.empty()) &&
-                         output.assigned_sink_names[index] == added->second.name);
+                    matching_route = engine.sink_binding_matches(output, index, added->second);
                     if (matching_route) break;
                 }
                 if (matching_route) {

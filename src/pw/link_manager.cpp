@@ -357,16 +357,12 @@ bool PipeWireEngine::assign_output_sink_locked(std::string_view output_selector,
     std::size_t placeholder_index = output->assigned_sink_count;
     for (std::size_t i = 0; i < output->assigned_sink_count; ++i) {
         if (output->assigned_sink_node_ids[i] == PW_ID_ANY &&
-            ((!output->assigned_sink_identities[i].empty() &&
-              output->assigned_sink_identities[i] == sink->device_identity) ||
-             ((output->assigned_sink_identities[i].empty() || sink->device_identity.empty()) &&
-              output->assigned_sink_names[i] == sink->name))) placeholder_index = i;
+            sink_binding_matches(*output, i, *sink)) placeholder_index = i;
     }
     if (assigned && route_exists) {
         error = "output channel is already assigned to playback sink: " + std::string(sink_selector);
         return false;
     }
-
     if (!assigned) {
         if (!route_exists) {
             error = "output channel is not assigned to playback sink: " + std::string(sink_selector);

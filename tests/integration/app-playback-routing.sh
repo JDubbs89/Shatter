@@ -368,6 +368,7 @@ if awk -v rms="$(audio_rms "$test_root/output-muted.raw")" 'BEGIN { exit !(rms >
 fi
 "$binary" set mute output "Headphone Monitor" off
 "$binary" set gain output "Headphone Monitor" 0
+"$binary" unassign out "Headphone Monitor" "sink-$anchor_sink_id"
 "$binary" assign stream "$stream_a_id" speakers
 "$binary" assign stream "$stream_a_id" "Headphone Monitor"
 sleep 0.3
@@ -413,7 +414,6 @@ if rms < 0.005:
     raise SystemExit("named output did not deliver audio to its second sink: rms=%s" % rms)
 PY
 "$binary" unassign out "Headphone Monitor" "sink-$headphones_sink_id"
-"$binary" unassign out "Headphone Monitor" "sink-$anchor_sink_id"
 sleep 0.3
 output_row=$(printf '%s\n' "$($binary --list-out)" | awk '/Headphone Monitor/ { print; exit }')
 case "$output_row" in
@@ -440,14 +440,7 @@ case "$output_row" in
     *) ;;
 esac
 "$binary" unassign app "$app_a_id" "Headphone Monitor"
-"$binary" unassign stream "$stream_a_id" "Headphone Monitor"
-"$binary" delete out "Headphone Monitor"
 "$binary" unassign stream "$stream_a_id" speakers
-output_listing=$("$binary" --list-out)
-case "$output_listing" in
-    *"Headphone Monitor"*) echo "deleted output channel remained in the output list: $output_listing" >&2; exit 1 ;;
-    *) ;;
-esac
 
 "$binary" --set-gain stream "$stream_a_id" -7
 "$binary" --set-mute stream "$stream_a_id" on
@@ -499,9 +492,21 @@ if [ "$recreated_state" != "-7.0 dB:yes" ]; then
     echo "recreated playback stream did not restore its controls: $recreated_stream" >&2
     exit 1
 fi
+recreated_sends=$(printf '%s\n' "$recreated_stream" | awk -F'|' '{ gsub(/^[[:space:]]+|[[:space:]]+$/, "", $7); print $7 }')
+if [ "$recreated_sends" != "Headphone Monitor" ]; then
+    echo "recreated playback stream did not restore its output send: $recreated_stream" >&2
+    exit 1
+fi
 recreated_stream_id=$(printf '%s\n' "$recreated_stream" | awk -F'|' '{ row=$6; sub(/^.*\(/, "", row); sub(/\).*/, "", row); print row }')
 "$binary" --set-gain stream "$recreated_stream_id" 0
 "$binary" --set-mute stream "$recreated_stream_id" off
+"$binary" unassign stream "$recreated_stream_id" "Headphone Monitor"
+"$binary" delete out "Headphone Monitor"
+output_listing=$("$binary" --list-out)
+case "$output_listing" in
+    *"Headphone Monitor"*) echo "deleted output channel remained in the output list: $output_listing" >&2; exit 1 ;;
+    *) ;;
+esac
 kill "$recreated_playback_pid"
 wait "$recreated_playback_pid" 2>/dev/null || true
 for attempt in $(seq 1 50); do

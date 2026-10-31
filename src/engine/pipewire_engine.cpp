@@ -1015,6 +1015,15 @@ std::string PipeWireEngine::playback_route_key(std::string_view app_identity,
     return std::string(app_identity) + '\x1f' + std::string(original_name);
 }
 
+bool PipeWireEngine::sink_binding_matches(const OutputChannel& output, std::size_t index,
+                                          const NodeInfo& sink) const
+{
+    const std::string& identity = output.assigned_sink_identities[index];
+    return (!identity.empty() && identity == sink.device_identity) ||
+        ((identity.empty() || sink.device_identity.empty()) &&
+         output.assigned_sink_names[index] == sink.name);
+}
+
 void PipeWireEngine::run_loop()
 {
     pw_main_loop_run(main_loop_);
