@@ -19,6 +19,7 @@
 #include <string_view>
 #include <thread>
 #include <unordered_map>
+#include <vector>
 
 namespace shatter::engine {
 
@@ -45,6 +46,8 @@ public:
     bool set_capture_source(std::uint32_t source_node_id, std::string& error);
     bool set_capture_gain_db(float decibels, std::string& error);
     bool set_capture_muted(bool muted, std::string& error);
+    bool set_fader_db(std::string_view scope, std::string_view selector, float decibels,
+                      bool minimum, std::string& error);
     bool adjust_fader_db(std::string_view scope, std::string_view selector, float delta_db,
                          bool minimum, std::string& error);
     bool set_capture_speaker_send(bool enabled, std::string& error);
@@ -71,6 +74,8 @@ public:
     void pause_streams_for_shutdown() noexcept;
 
 private:
+    enum class FaderUpdateMode { absolute, relative, minimum };
+
     struct AppChannel {
         bool allocated = false;
         std::string identity;
@@ -160,9 +165,10 @@ private:
     };
     struct OutputRequest {
         PipeWireEngine* engine = nullptr;
-        enum class Action { make, remove, assign_sink, assign_app, assign_input } action = Action::make;
+        enum class Action { make, remove, assign_sink, assign_app, assign_input, load_config } action = Action::make;
         std::string first;
         std::string second;
+        state::Show show;
         bool assigned = false;
         bool succeeded = false;
         bool completed = false;
@@ -223,7 +229,11 @@ private:
     void refresh_output_link_locked();
     bool invoke_output_request(OutputRequest& request, std::string& error);
     bool make_output_locked(std::string name, std::string& error);
+    bool make_output_at_locked(std::string name, std::size_t slot, std::string& error);
     bool delete_output_locked(std::string_view selector, std::string& error);
+    bool apply_config_locked(state::Show show, std::string& error);
+    std::uint32_t output_mask_for_identities(const std::vector<std::string>& identities) const;
+    void restore_output_routes_locked(OutputChannel& output);
     bool assign_output_sink_locked(std::string_view output_selector, std::string_view sink_selector,
                                    bool assigned, std::string& error);
     bool assign_app_output_locked(std::string_view app_selector, std::string_view output_selector,
@@ -243,6 +253,8 @@ private:
     PlaybackStream* resolve_stream_locked(std::string_view selector, std::string& error);
     std::string playback_route_key(std::string_view app_identity, std::string_view original_name) const;
     bool sink_binding_matches(const OutputChannel& output, std::size_t index, const NodeInfo& sink) const;
+    bool update_fader_db(std::string_view scope, std::string_view selector, float decibels,
+                         FaderUpdateMode mode, std::string& error);
     void run_loop();
     void cleanup();
 

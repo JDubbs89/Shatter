@@ -59,6 +59,10 @@ void PipeWireEngine::on_global(void* data, std::uint32_t id, std::uint32_t,
             std::lock_guard lock(engine.nodes_mutex_);
             engine.links_[id] = link;
             engine.refresh_output_link_locked();
+            for (auto& output : engine.output_channels_)
+                if (output.in_use && output.node_id == link.output_node)
+                    engine.restore_output_routes_locked(output);
+            engine.refresh_output_link_locked();
         }
         engine.state_changed_.notify_all();
         return;
@@ -78,19 +82,11 @@ void PipeWireEngine::on_global(void* data, std::uint32_t id, std::uint32_t,
         std::lock_guard lock(engine.nodes_mutex_);
         engine.ports_[id] = port;
         const auto sink = engine.nodes_.find(port.node_id);
-        if (sink != engine.nodes_.end() && sink->second.media_class == "Audio/Sink") {
-            for (auto& output : engine.output_channels_) {
-                if (!output.in_use) continue;
-                bool pending = false;
-                for (std::size_t i = 0; i < output.assigned_sink_count; ++i)
-                    if (output.assigned_sink_node_ids[i] == PW_ID_ANY &&
-                        engine.sink_binding_matches(output, i, sink->second)) pending = true;
-                if (pending) {
-                    std::string route_error;
-                    engine.assign_output_sink_locked(output.name, sink->second.name, true, route_error);
-                }
-            }
-        }
+        for (auto& output : engine.output_channels_)
+            if (output.in_use && (output.node_id == port.node_id ||
+                (sink != engine.nodes_.end() && sink->second.media_class == "Audio/Sink")))
+                engine.restore_output_routes_locked(output);
+        engine.refresh_output_link_locked();
         return;
     }
 
@@ -132,28 +128,8 @@ void PipeWireEngine::on_global(void* data, std::uint32_t id, std::uint32_t,
     engine.nodes_[id] = std::move(node);
     const auto added = engine.nodes_.find(id);
     if (added != engine.nodes_.end() && added->second.media_class == "Audio/Sink") {
-        const bool has_input_port = std::any_of(engine.ports_.begin(), engine.ports_.end(),
-            [id](const auto& entry) { return entry.second.node_id == id && entry.second.input; });
-        if (has_input_port) {
-            for (auto& output : engine.output_channels_) {
-                if (!output.in_use) continue;
-                const bool pending = std::any_of(
-                    output.assigned_sink_node_ids.begin(),
-                    output.assigned_sink_node_ids.begin() + output.assigned_sink_count,
-                    [](std::uint32_t sink_id) { return sink_id == PW_ID_ANY; });
-                if (!pending) continue;
-                bool matching_route = false;
-                for (std::size_t index = 0; index < output.assigned_sink_count; ++index) {
-                    if (output.assigned_sink_node_ids[index] != PW_ID_ANY) continue;
-                    matching_route = engine.sink_binding_matches(output, index, added->second);
-                    if (matching_route) break;
-                }
-                if (matching_route) {
-                    std::string route_error;
-                    engine.assign_output_sink_locked(output.name, added->second.name, true, route_error);
-                }
-            }
-        }
+        for (auto& output : engine.output_channels_)
+            if (output.in_use) engine.restore_output_routes_locked(output);
     }
     engine.refresh_output_link_locked();
 }

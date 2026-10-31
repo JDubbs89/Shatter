@@ -15,6 +15,7 @@
 #include <cstring>
 #include <iomanip>
 #include <sstream>
+#include <set>
 #include <sys/resource.h>
 #include <utility>
 #include <vector>
@@ -345,14 +346,31 @@ bool PipeWireEngine::set_capture_muted(bool muted, std::string&)
 bool PipeWireEngine::adjust_fader_db(std::string_view scope, std::string_view selector, float delta_db,
                                      bool minimum, std::string& error)
 {
-    if (!minimum && !std::isfinite(delta_db)) {
-        error = "fader increment must be a finite number of dB or -inf";
+    return update_fader_db(scope, selector, delta_db,
+                           minimum ? FaderUpdateMode::minimum : FaderUpdateMode::relative, error);
+}
+
+bool PipeWireEngine::set_fader_db(std::string_view scope, std::string_view selector, float decibels,
+                                  bool minimum, std::string& error)
+{
+    return update_fader_db(scope, selector, decibels,
+                           minimum ? FaderUpdateMode::minimum : FaderUpdateMode::absolute, error);
+}
+
+bool PipeWireEngine::update_fader_db(std::string_view scope, std::string_view selector, float decibels,
+                                     FaderUpdateMode mode, std::string& error)
+{
+    if (mode != FaderUpdateMode::minimum && !std::isfinite(decibels)) {
+        error = mode == FaderUpdateMode::absolute
+            ? "fader level must be a finite number of dB or -inf"
+            : "fader increment must be a finite number of dB";
         return false;
     }
-    const auto adjusted = [delta_db, minimum](float current_gain) {
-        if (minimum) return 0.0F;
-        const float target_db = std::clamp(gain_db(current_gain) + delta_db,
-                                           kMinimumGainDb, kMaximumGainDb);
+    const auto adjusted = [decibels, mode](float current_gain) {
+        if (mode == FaderUpdateMode::minimum) return 0.0F;
+        const float target_db = mode == FaderUpdateMode::absolute
+            ? std::clamp(decibels, kMinimumGainDb, kMaximumGainDb)
+            : std::clamp(gain_db(current_gain) + decibels, kMinimumGainDb, kMaximumGainDb);
         return std::pow(10.0F, target_db / 20.0F);
     };
 
@@ -436,18 +454,120 @@ bool PipeWireEngine::save_config(std::string_view name, std::string& error)
     state::Show show;
     {
         std::lock_guard lock(nodes_mutex_);
+        show = loaded_show_;
+        show.outputs.clear();
+        const auto identities_for_mask = [this](std::uint32_t mask) {
+            std::vector<std::string> identities;
+            for (std::size_t i = 0; i < output_channels_.size(); ++i) {
+                if ((mask & (1U << i)) != 0 && output_channels_[i].in_use)
+                    identities.push_back(output_channels_[i].node_name);
+            }
+            return identities;
+        };
         for (std::size_t i = 0; i < allocated_channels_.load(); ++i) {
             const auto& app = app_channels_[i];
             if (!app.allocated) continue;
-            show.apps.push_back({app.identity, app.name, gain_db(app.target_gain.load()), app.muted.load()});
+            auto found = std::find_if(show.apps.begin(), show.apps.end(), [&](const auto& item) {
+                return item.identity == app.identity;
+            });
+            state::AppSetting setting;
+            setting.identity = app.identity;
+            setting.name = app.name;
+            setting.gain_db = gain_db(app.target_gain.load());
+            setting.muted = app.muted.load();
+            setting.output_identities = identities_for_mask(app.output_mask.load(std::memory_order_relaxed));
+            setting.has_output_sends = true;
+            if (found == show.apps.end()) show.apps.push_back(std::move(setting));
+            else *found = std::move(setting);
         }
         for (std::size_t i = 0; i < allocated_streams_.load(); ++i) {
             const auto& stream = playback_streams_[i];
             if (!stream.in_use) continue;
             const auto& app = app_channels_[stream.channel_index];
-            show.streams.push_back({app.identity, stream.original_name, stream.name,
-                                    gain_db(stream.target_gain.load()), stream.muted.load()});
+            auto found = std::find_if(show.streams.begin(), show.streams.end(), [&](const auto& item) {
+                return item.app_identity == app.identity && item.original_name == stream.original_name;
+            });
+            state::StreamSetting setting;
+            setting.app_identity = app.identity;
+            setting.original_name = stream.original_name;
+            setting.name = stream.name;
+            setting.gain_db = gain_db(stream.target_gain.load());
+            setting.muted = stream.muted.load();
+            setting.output_identities = identities_for_mask(stream.output_mask.load(std::memory_order_relaxed));
+            setting.has_output_sends = true;
+            if (found == show.streams.end()) show.streams.push_back(std::move(setting));
+            else *found = std::move(setting);
         }
+        for (const auto& [key, saved_state] : playback_route_state_) {
+            const auto separator = key.find('\x1f');
+            if (separator == std::string::npos) continue;
+            const std::string app_identity = key.substr(0, separator);
+            const std::string original_name = key.substr(separator + 1);
+            const bool currently_active = std::any_of(
+                playback_streams_.begin(), playback_streams_.begin() + allocated_streams_.load(),
+                [&](const auto& stream) {
+                    return stream.in_use &&
+                        app_channels_[stream.channel_index].identity == app_identity &&
+                        stream.original_name == original_name;
+                });
+            if (currently_active) continue;
+            auto found = std::find_if(show.streams.begin(), show.streams.end(), [&](const auto& item) {
+                return item.app_identity == app_identity && item.original_name == original_name;
+            });
+            if (found == show.streams.end()) {
+                state::StreamSetting setting;
+                setting.app_identity = app_identity;
+                setting.original_name = original_name;
+                setting.name = saved_state.name;
+                setting.gain_db = gain_db(saved_state.gain);
+                setting.muted = saved_state.muted;
+                setting.output_identities = identities_for_mask(saved_state.output_mask);
+                setting.has_output_sends = true;
+                show.streams.push_back(std::move(setting));
+            } else {
+                found->name = saved_state.name;
+                found->gain_db = gain_db(saved_state.gain);
+                found->muted = saved_state.muted;
+                found->output_identities = identities_for_mask(saved_state.output_mask);
+                found->has_output_sends = true;
+            }
+        }
+        show.capture_output_identities = identities_for_mask(
+            capture_channel_.output_mask.load(std::memory_order_relaxed));
+        show.has_capture_sends = true;
+        for (std::size_t i = 1; i < output_channels_.size(); ++i) {
+            const auto& output = output_channels_[i];
+            if (!output.in_use) continue;
+            state::OutputSetting setting;
+            setting.slot = i;
+            setting.identity = output.node_name;
+            setting.name = output.name;
+            for (std::size_t sink = 0; sink < output.assigned_sink_count; ++sink) {
+                if (output.assigned_sink_names[sink].empty()) continue;
+                setting.sinks.push_back({output.assigned_sink_identities[sink], output.assigned_sink_names[sink]});
+            }
+            show.outputs.push_back(std::move(setting));
+        }
+        std::set<std::string> valid_output_ids{"shatter.speakers"};
+        for (const auto& output : show.outputs) valid_output_ids.insert(output.identity);
+        const auto prune_sends = [&valid_output_ids](auto& item) {
+            std::erase_if(item.output_identities, [&](const auto& identity) {
+                return !valid_output_ids.contains(identity);
+            });
+        };
+        for (auto& app : show.apps) prune_sends(app);
+        for (auto& stream : show.streams) prune_sends(stream);
+        for (auto& app : show.apps) {
+            if (!app.has_output_sends) {
+                app.output_identities = {"shatter.speakers"};
+                app.has_output_sends = true;
+            }
+        }
+        for (auto& stream : show.streams) stream.has_output_sends = true;
+        show.has_capture_sends = true;
+        std::erase_if(show.capture_output_identities, [&](const auto& identity) {
+            return !valid_output_ids.contains(identity);
+        });
     }
     return state_store_.save(name, show, error);
 }
@@ -456,32 +576,23 @@ bool PipeWireEngine::load_config(std::string_view name, std::string& error)
 {
     state::Show show;
     if (!state_store_.load(name, show, error)) return false;
-    std::lock_guard lock(nodes_mutex_);
-    loaded_show_ = std::move(show);
-    auto gain = [](float db) { return std::pow(10.0F, db / 20.0F); };
-    for (std::size_t i = 0; i < allocated_channels_.load(); ++i) {
-        auto& app = app_channels_[i];
-        for (const auto& saved : loaded_show_.apps) {
-            if (app.identity != saved.identity) continue;
-            app.name = saved.name;
-            app.target_gain.store(gain(saved.gain_db));
-            app.muted.store(saved.muted);
-            break;
-        }
+    OutputRequest request{};
+    request.engine = this;
+    request.action = OutputRequest::Action::load_config;
+    request.first = std::string(name);
+    request.show = std::move(show);
+    return invoke_output_request(request, error);
+}
+
+std::uint32_t PipeWireEngine::output_mask_for_identities(const std::vector<std::string>& identities) const
+{
+    std::uint32_t mask = 0;
+    for (std::size_t i = 0; i < output_channels_.size(); ++i) {
+        if (!output_channels_[i].in_use) continue;
+        if (std::find(identities.begin(), identities.end(), output_channels_[i].node_name) != identities.end())
+            mask |= 1U << i;
     }
-    for (std::size_t i = 0; i < allocated_streams_.load(); ++i) {
-        auto& stream = playback_streams_[i];
-        if (!stream.in_use) continue;
-        const auto& app = app_channels_[stream.channel_index];
-        for (const auto& saved : loaded_show_.streams) {
-            if (app.identity != saved.app_identity || stream.original_name != saved.original_name) continue;
-            stream.name = saved.name;
-            stream.target_gain.store(gain(saved.gain_db));
-            stream.muted.store(saved.muted);
-            break;
-        }
-    }
-    return true;
+    return mask;
 }
 
 bool PipeWireEngine::load_default_config(std::string& name, std::string& error)
@@ -657,25 +768,38 @@ std::string PipeWireEngine::list_outputs(std::size_t) const
 std::string PipeWireEngine::fader_status() const
 {
     std::lock_guard lock(nodes_mutex_);
-    std::vector<TableRow> rows;
+    std::vector<TableRow> app_rows;
     for (std::size_t i = 0; i < allocated_channels_.load(std::memory_order_relaxed); ++i) {
         const auto& channel = app_channels_[i];
-        rows.push_back({channel.name + " (app)", format_fader_position(channel.target_gain.load())});
+        app_rows.push_back({channel.name, format_fader_position(channel.target_gain.load())});
     }
+    std::vector<TableRow> stream_rows;
     for (std::size_t i = 0; i < allocated_streams_.load(std::memory_order_relaxed); ++i) {
         const auto& stream = playback_streams_[i];
         if (!stream.in_use || !stream.active.load(std::memory_order_relaxed)) continue;
-        rows.push_back({stream.name + " (stream)", format_fader_position(stream.target_gain.load())});
+        stream_rows.push_back({stream.name, format_fader_position(stream.target_gain.load())});
     }
-    rows.push_back({"Capture", format_fader_position(capture_channel_.target_gain.load())});
+    std::vector<TableRow> capture_rows{
+        {"Capture channel", format_fader_position(capture_channel_.target_gain.load())}
+    };
+    std::vector<TableRow> output_rows;
     for (const auto& output : output_channels_) {
         if (!output.in_use) continue;
-        rows.push_back({output.name + " (output)", format_fader_position(output.target_gain.load())});
+        output_rows.push_back({output.name, format_fader_position(output.target_gain.load())});
     }
 
     std::ostringstream table;
     table << "Fader status (range: -inf to +12 dB)\n";
-    append_table(table, {"Channel name", "Fader position"}, rows, {32, 70});
+    const auto append_group = [&table](std::string_view title, std::vector<TableRow> rows,
+                                       std::string_view empty_message) {
+        if (rows.empty()) rows.push_back({std::string(empty_message), ""});
+        table << '\n' << title << '\n';
+        append_table(table, {"Channel name", "Fader position"}, rows, {32, 70});
+    };
+    append_group("Apps", std::move(app_rows), "No app channels");
+    append_group("Streams", std::move(stream_rows), "No active playback streams");
+    append_group("Capture", std::move(capture_rows), "No capture channel");
+    append_group("Outputs", std::move(output_rows), "No output channels");
     return table.str();
 }
 
@@ -777,6 +901,7 @@ void PipeWireEngine::on_output_state_changed(void* data, pw_stream_state, pw_str
             engine.speaker_node_id_.store(output.node_id, std::memory_order_relaxed);
         }
         std::lock_guard lock(engine.nodes_mutex_);
+        engine.restore_output_routes_locked(output);
         engine.refresh_output_link_locked();
     }
     {
@@ -946,6 +1071,8 @@ std::size_t PipeWireEngine::get_or_create_channel_locked(const NodeInfo& node)
         channel.name = saved.name;
         channel.target_gain.store(std::pow(10.0F, saved.gain_db / 20.0F));
         channel.muted.store(saved.muted);
+        if (saved.has_output_sends)
+            channel.output_mask.store(output_mask_for_identities(saved.output_identities));
         break;
     }
     channel_by_identity_[channel.identity] = index;

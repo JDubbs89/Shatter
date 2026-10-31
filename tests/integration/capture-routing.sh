@@ -98,7 +98,7 @@ case "$fader_status" in
     *"Capture"*"-6.0 dB"*) ;;
     *) echo "capture fader did not apply a relative decrement: $fader_status" >&2; exit 1 ;;
 esac
-"$binary" set fader capture capture +6
+"$binary" inc fader capture capture +6
 sleep 0.3
 inputs=$($binary --list-in)
 case "$inputs" in
@@ -146,6 +146,21 @@ sleep 0.25
 record_monitor "$test_root/capture-muted.raw"
 "$binary" set mute capture capture off
 "$binary" assign capture capture "Capture Monitor"
+"$binary" save show capture-routes
+"$binary" unassign capture capture speakers
+"$binary" unassign capture capture "Capture Monitor"
+"$binary" delete out "Capture Monitor"
+"$binary" load show capture-routes
+inputs=$("$binary" list in)
+case "$inputs" in
+    *"capture"*"speakers, Capture..."*) ;;
+    *) echo "loaded show did not restore capture sends: $inputs" >&2; exit 1 ;;
+esac
+outputs=$("$binary" list out)
+case "$outputs" in
+    *"Capture Monitor"*"sink-$sink_id"*) ;;
+    *) echo "loaded show did not restore the named output and sink binding: $outputs" >&2; exit 1 ;;
+esac
 sleep 0.25
 record_monitor "$test_root/two-sends.raw"
 "$binary" unassign capture capture speakers

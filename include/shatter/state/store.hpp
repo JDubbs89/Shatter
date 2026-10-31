@@ -4,6 +4,7 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include <cstddef>
 
 namespace shatter::state {
 
@@ -12,6 +13,8 @@ struct AppSetting {
     std::string name;
     float gain_db = 0.0F;
     bool muted = false;
+    std::vector<std::string> output_identities;
+    bool has_output_sends = false;
 };
 
 struct StreamSetting {
@@ -20,11 +23,28 @@ struct StreamSetting {
     std::string name;
     float gain_db = 0.0F;
     bool muted = false;
+    std::vector<std::string> output_identities;
+    bool has_output_sends = false;
+};
+
+struct SinkBinding {
+    std::string identity;
+    std::string name;
+};
+
+struct OutputSetting {
+    std::size_t slot = 0;
+    std::string identity;
+    std::string name;
+    std::vector<SinkBinding> sinks;
 };
 
 struct Show {
     std::vector<AppSetting> apps;
     std::vector<StreamSetting> streams;
+    std::vector<OutputSetting> outputs;
+    std::vector<std::string> capture_output_identities;
+    bool has_capture_sends = false;
 };
 
 class Store {

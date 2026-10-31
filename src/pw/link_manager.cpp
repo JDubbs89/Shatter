@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
+#include <set>
 #include <string>
 #include <thread>
 #include <unistd.h>
@@ -134,6 +135,7 @@ bool PipeWireEngine::invoke_output_request(OutputRequest& request, std::string& 
         case OutputRequest::Action::assign_sink: error = "PipeWire could not update the output sink route"; break;
         case OutputRequest::Action::assign_app: error = "PipeWire could not update the app channel's output sends"; break;
         case OutputRequest::Action::assign_input: error = "could not update input channel output sends"; break;
+        case OutputRequest::Action::load_config: error = "could not apply configuration"; break;
         }
     }
     trace_output("operation.invoke-return", &request,
@@ -197,6 +199,9 @@ int PipeWireEngine::on_output_request(spa_loop*, bool, std::uint32_t, const void
         }
         break;
     }
+    case OutputRequest::Action::load_config:
+        request.succeeded = engine.apply_config_locked(std::move(request.show), request.error);
+        break;
     }
     trace_output("loop.callback-exit", &request,
                  "action=" + std::to_string(static_cast<int>(request.action)) +
@@ -210,6 +215,22 @@ int PipeWireEngine::on_output_request(spa_loop*, bool, std::uint32_t, const void
 }
 
 bool PipeWireEngine::make_output_locked(std::string name, std::string& error)
+{
+    std::size_t slot = max_output_channels;
+    {
+        std::lock_guard lock(nodes_mutex_);
+        for (std::size_t index = 1; index < output_channels_.size(); ++index) {
+            if (!output_channels_[index].in_use) { slot = index; break; }
+        }
+    }
+    if (slot == max_output_channels) {
+        error = "Shatter reached its output channel limit";
+        return false;
+    }
+    return make_output_at_locked(std::move(name), slot, error);
+}
+
+bool PipeWireEngine::make_output_at_locked(std::string name, std::size_t slot, std::string& error)
 {
     if (name.empty() || name.size() > 128 || name.find_first_of("\r\n") != std::string::npos ||
         name.find('\0') != std::string::npos) {
@@ -225,12 +246,20 @@ bool PipeWireEngine::make_output_locked(std::string name, std::string& error)
         return false;
     }
     std::unique_lock lock(nodes_mutex_);
-    for (const auto& output : output_channels_) {
-        if (output.in_use && output.name == name) { error = "an output channel already uses the name: " + name; return false; }
+    if (slot == 0 || slot >= output_channels_.size()) {
+        error = "configuration output slot is outside the supported range";
+        return false;
     }
-    for (std::size_t index = 1; index < output_channels_.size(); ++index) {
+    for (const auto& output : output_channels_) {
+        if (output.in_use && output.name == name) {
+            error = "an output channel already uses the name: " + name;
+            return false;
+        }
+    }
+    {
+        const std::size_t index = slot;
         OutputChannel& output = output_channels_[index];
-        if (output.in_use) continue;
+        if (output.in_use) { error = "configuration output slot is already in use"; return false; }
         output.engine = this;
         output.in_use = true;
         output.target_gain.store(1.0F, std::memory_order_relaxed);
@@ -252,8 +281,147 @@ bool PipeWireEngine::make_output_locked(std::string name, std::string& error)
         }
         return true;
     }
-    error = "Shatter reached its output channel limit";
-    return false;
+}
+
+bool PipeWireEngine::apply_config_locked(state::Show show, std::string& error)
+{
+    std::set<std::size_t> slots;
+    std::set<std::string> identities;
+    std::set<std::string> names{"speakers"};
+    for (const auto& saved : show.outputs) {
+        if (saved.slot == 0 || saved.slot >= max_output_channels ||
+            saved.identity != "shatter.output." + std::to_string(saved.slot) ||
+            saved.name.empty() || saved.name.size() > 128 || saved.name == "speakers" ||
+            !slots.insert(saved.slot).second || !identities.insert(saved.identity).second ||
+            !names.insert(saved.name).second || saved.sinks.size() > 8) {
+            error = "configuration contains an invalid output channel identity, name, or slot";
+            return false;
+        }
+        for (const auto& sink : saved.sinks) {
+            if (sink.name.empty()) { error = "configuration contains an output sink without a name"; return false; }
+        }
+    }
+
+    for (std::size_t index = 1; index < output_channels_.size(); ++index) {
+        if (output_channels_[index].in_use && !delete_output_locked(output_channels_[index].name, error))
+            return false;
+    }
+    playback_route_state_.clear();
+    for (const auto& saved : show.outputs) {
+        if (!make_output_at_locked(saved.name, saved.slot, error)) return false;
+    }
+
+    {
+        std::lock_guard lock(nodes_mutex_);
+        loaded_show_ = std::move(show);
+        for (const auto& saved : loaded_show_.outputs) {
+            auto& output = output_channels_[saved.slot];
+            output.assigned_sink_count = saved.sinks.size();
+            for (std::size_t i = 0; i < saved.sinks.size(); ++i) {
+                output.assigned_sink_node_ids[i] = PW_ID_ANY;
+                output.assigned_sink_names[i] = saved.sinks[i].name;
+                output.assigned_sink_identities[i] = saved.sinks[i].identity;
+            }
+        }
+        for (std::size_t index = 0; index < allocated_channels_.load(); ++index) {
+            auto& app = app_channels_[index];
+            app.target_gain.store(1.0F, std::memory_order_relaxed);
+            app.muted.store(false, std::memory_order_relaxed);
+            app.output_mask.store(1U, std::memory_order_relaxed);
+            for (const auto& saved : loaded_show_.apps) {
+                if (saved.identity != app.identity) continue;
+                app.name = saved.name;
+                app.target_gain.store(std::pow(10.0F, saved.gain_db / 20.0F));
+                app.muted.store(saved.muted);
+                if (saved.has_output_sends)
+                    app.output_mask.store(output_mask_for_identities(saved.output_identities));
+                break;
+            }
+        }
+        for (std::size_t index = 0; index < allocated_streams_.load(); ++index) {
+            auto& stream = playback_streams_[index];
+            if (!stream.in_use) continue;
+            stream.target_gain.store(1.0F, std::memory_order_relaxed);
+            stream.muted.store(false, std::memory_order_relaxed);
+            stream.output_mask.store(0, std::memory_order_relaxed);
+            const auto& app = app_channels_[stream.channel_index];
+            for (const auto& saved : loaded_show_.streams) {
+                if (app.identity != saved.app_identity || stream.original_name != saved.original_name) continue;
+                stream.name = saved.name;
+                stream.target_gain.store(std::pow(10.0F, saved.gain_db / 20.0F));
+                stream.muted.store(saved.muted);
+                if (saved.has_output_sends)
+                    stream.output_mask.store(output_mask_for_identities(saved.output_identities));
+                break;
+            }
+        }
+        capture_channel_.output_mask.store(loaded_show_.has_capture_sends
+            ? output_mask_for_identities(loaded_show_.capture_output_identities) : 0U,
+            std::memory_order_release);
+    }
+    return true;
+}
+
+void PipeWireEngine::restore_output_routes_locked(OutputChannel& output)
+{
+    if (output.node_id == PW_ID_ANY || output.assigned_sink_count == 0) return;
+    std::vector<state::SinkBinding> pending;
+    std::vector<state::SinkBinding> attached;
+    std::vector<std::uint32_t> attached_node_ids;
+    for (std::size_t i = 0; i < output.assigned_sink_count; ++i) {
+        if (output.assigned_sink_node_ids[i] == PW_ID_ANY) {
+            pending.push_back({output.assigned_sink_identities[i], output.assigned_sink_names[i]});
+        } else {
+            attached.push_back({output.assigned_sink_identities[i], output.assigned_sink_names[i]});
+            attached_node_ids.push_back(output.assigned_sink_node_ids[i]);
+        }
+    }
+    if (pending.empty()) return;
+
+    output.assigned_sink_count = attached.size();
+    for (auto& node_id : output.assigned_sink_node_ids) node_id = PW_ID_ANY;
+    for (auto& name : output.assigned_sink_names) name.clear();
+    for (auto& identity : output.assigned_sink_identities) identity.clear();
+    for (std::size_t i = 0; i < attached.size(); ++i) {
+        output.assigned_sink_node_ids[i] = attached_node_ids[i];
+        output.assigned_sink_names[i] = std::move(attached[i].name);
+        output.assigned_sink_identities[i] = std::move(attached[i].identity);
+    }
+
+    std::vector<bool> matched(pending.size(), false);
+    for (std::size_t index = 0; index < pending.size(); ++index) {
+        NodeInfo* match = nullptr;
+        for (auto& [node_id, sink] : nodes_) {
+            (void)node_id;
+            if (sink.media_class != "Audio/Sink" || sink.name.starts_with("shatter.stream.")) continue;
+            const bool same_identity = !pending[index].identity.empty() &&
+                pending[index].identity == sink.device_identity;
+            const bool fallback_name = (pending[index].identity.empty() || sink.device_identity.empty()) &&
+                pending[index].name == sink.name;
+            if (!same_identity && !fallback_name) continue;
+            if (match != nullptr) { match = nullptr; break; }
+            match = &sink;
+        }
+        if (match == nullptr) continue;
+        if (std::find(output.assigned_sink_node_ids.begin(),
+                      output.assigned_sink_node_ids.begin() + output.assigned_sink_count,
+                      match->node_id) != output.assigned_sink_node_ids.begin() + output.assigned_sink_count) {
+            matched[index] = true;
+            continue;
+        }
+        if (output.assigned_sink_count != 0 && !output.linked.load(std::memory_order_acquire))
+            continue;
+        std::string route_error;
+        const std::string sink_selector = "sink-" + std::to_string(match->node_id);
+        if (assign_output_sink_locked(output.name, sink_selector, true, route_error)) matched[index] = true;
+    }
+    for (std::size_t index = 0; index < pending.size() && output.assigned_sink_count < output.assigned_sink_node_ids.size(); ++index) {
+        if (matched[index]) continue;
+        const auto slot = output.assigned_sink_count++;
+        output.assigned_sink_node_ids[slot] = PW_ID_ANY;
+        output.assigned_sink_names[slot] = std::move(pending[index].name);
+        output.assigned_sink_identities[slot] = std::move(pending[index].identity);
+    }
 }
 
 bool PipeWireEngine::delete_output_locked(std::string_view selector, std::string& error)

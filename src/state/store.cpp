@@ -4,6 +4,8 @@
 #include <cstdlib>
 #include <fstream>
 #include <iomanip>
+#include <map>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <utility>
@@ -11,7 +13,8 @@
 namespace shatter::state {
 namespace {
 
-constexpr std::string_view kHeader = "SHATTER-CONFIG 1";
+constexpr std::string_view kHeaderV1 = "SHATTER-CONFIG 1";
+constexpr std::string_view kHeader = "SHATTER-CONFIG 2";
 constexpr float kMinimumGainDb = -60.0F;
 constexpr float kMaximumGainDb = 12.0F;
 
@@ -131,12 +134,14 @@ bool Store::load(std::string_view name, Show& show, std::string& error) const
             return false;
         }
         std::string header;
-        if (!std::getline(file, header) || header != kHeader) {
+        if (!std::getline(file, header) || (header != kHeader && header != kHeaderV1)) {
             error = "unsupported or invalid configuration format";
             return false;
         }
+        const bool version_two = header == kHeader;
 
         Show loaded;
+        std::map<std::string, std::size_t> outputs_by_identity;
         std::string line;
         while (std::getline(file, line)) {
             std::istringstream row(line);
@@ -145,15 +150,29 @@ bool Store::load(std::string_view name, Show& show, std::string& error) const
             int muted = 0;
             if (type == 'A') {
                 AppSetting item;
+                std::size_t send_count = 0;
                 if (!(row >> std::quoted(item.identity) >> std::quoted(item.name) >> item.gain_db >> muted) ||
                     (muted != 0 && muted != 1) || !valid_gain(item.gain_db)) {
                     error = "invalid app entry in configuration";
                     return false;
                 }
                 item.muted = muted != 0;
+                if (version_two) {
+                    if (!(row >> send_count)) { error = "invalid app send list in configuration"; return false; }
+                    item.has_output_sends = true;
+                    for (std::size_t i = 0; i < send_count; ++i) {
+                        std::string identity;
+                        if (!(row >> std::quoted(identity)) || identity.empty()) {
+                            error = "invalid app send list in configuration";
+                            return false;
+                        }
+                        item.output_identities.push_back(std::move(identity));
+                    }
+                }
                 loaded.apps.push_back(std::move(item));
             } else if (type == 'S') {
                 StreamSetting item;
+                std::size_t send_count = 0;
                 if (!(row >> std::quoted(item.app_identity) >> std::quoted(item.original_name) >>
                       std::quoted(item.name) >> item.gain_db >> muted) ||
                     (muted != 0 && muted != 1) || !valid_gain(item.gain_db)) {
@@ -161,7 +180,55 @@ bool Store::load(std::string_view name, Show& show, std::string& error) const
                     return false;
                 }
                 item.muted = muted != 0;
+                if (version_two) {
+                    if (!(row >> send_count)) { error = "invalid stream send list in configuration"; return false; }
+                    item.has_output_sends = true;
+                    for (std::size_t i = 0; i < send_count; ++i) {
+                        std::string identity;
+                        if (!(row >> std::quoted(identity)) || identity.empty()) {
+                            error = "invalid stream send list in configuration";
+                            return false;
+                        }
+                        item.output_identities.push_back(std::move(identity));
+                    }
+                }
                 loaded.streams.push_back(std::move(item));
+            } else if (type == 'O' && version_two) {
+                OutputSetting item;
+                if (!(row >> item.slot >> std::quoted(item.identity) >> std::quoted(item.name)) ||
+                    item.identity.empty() || item.name.empty() || outputs_by_identity.contains(item.identity)) {
+                    error = "invalid or duplicate output entry in configuration";
+                    return false;
+                }
+                outputs_by_identity[item.identity] = loaded.outputs.size();
+                loaded.outputs.push_back(std::move(item));
+            } else if (type == 'B' && version_two) {
+                std::string output_identity;
+                SinkBinding binding;
+                if (!(row >> std::quoted(output_identity) >> std::quoted(binding.identity) >>
+                      std::quoted(binding.name)) || binding.name.empty()) {
+                    error = "invalid output sink binding in configuration";
+                    return false;
+                }
+                const auto output = outputs_by_identity.find(output_identity);
+                if (output == outputs_by_identity.end()) {
+                    error = "output sink binding references an unknown output";
+                    return false;
+                }
+                loaded.outputs[output->second].sinks.push_back(std::move(binding));
+            } else if (type == 'C' && version_two) {
+                if (loaded.has_capture_sends) { error = "duplicate capture entry in configuration"; return false; }
+                std::size_t send_count = 0;
+                if (!(row >> send_count)) { error = "invalid capture send list in configuration"; return false; }
+                loaded.has_capture_sends = true;
+                for (std::size_t i = 0; i < send_count; ++i) {
+                    std::string identity;
+                    if (!(row >> std::quoted(identity)) || identity.empty()) {
+                        error = "invalid capture send list in configuration";
+                        return false;
+                    }
+                    loaded.capture_output_identities.push_back(std::move(identity));
+                }
             } else {
                 error = "unknown entry in configuration";
                 return false;
@@ -192,13 +259,30 @@ bool Store::save(std::string_view name, const Show& show, std::string& error) co
             return false;
         }
         file << kHeader << '\n' << std::setprecision(7);
+        std::set<std::string> output_identities;
+        for (const auto& output : show.outputs) {
+            if (output.identity.empty() || output.name.empty() ||
+                !output_identities.insert(output.identity).second) {
+                error = "output identity or name is invalid or duplicated";
+                return false;
+            }
+            file << "O " << output.slot << ' ' << std::quoted(output.identity) << ' '
+                 << std::quoted(output.name) << '\n';
+            for (const auto& sink : output.sinks) {
+                if (sink.name.empty()) { error = "output sink name cannot be empty"; return false; }
+                file << "B " << std::quoted(output.identity) << ' ' << std::quoted(sink.identity)
+                     << ' ' << std::quoted(sink.name) << '\n';
+            }
+        }
         for (const auto& app : show.apps) {
             if (!valid_gain(app.gain_db)) {
                 error = "app gain is outside the supported range";
                 return false;
             }
             file << "A " << std::quoted(app.identity) << ' ' << std::quoted(app.name) << ' '
-                 << app.gain_db << ' ' << (app.muted ? 1 : 0) << '\n';
+                 << app.gain_db << ' ' << (app.muted ? 1 : 0) << ' ' << app.output_identities.size();
+            for (const auto& identity : app.output_identities) file << ' ' << std::quoted(identity);
+            file << '\n';
         }
         for (const auto& stream : show.streams) {
             if (!valid_gain(stream.gain_db)) {
@@ -207,8 +291,13 @@ bool Store::save(std::string_view name, const Show& show, std::string& error) co
             }
             file << "S " << std::quoted(stream.app_identity) << ' '
                  << std::quoted(stream.original_name) << ' ' << std::quoted(stream.name) << ' '
-                 << stream.gain_db << ' ' << (stream.muted ? 1 : 0) << '\n';
+                 << stream.gain_db << ' ' << (stream.muted ? 1 : 0) << ' ' << stream.output_identities.size();
+            for (const auto& identity : stream.output_identities) file << ' ' << std::quoted(identity);
+            file << '\n';
         }
+        file << "C " << show.capture_output_identities.size();
+        for (const auto& identity : show.capture_output_identities) file << ' ' << std::quoted(identity);
+        file << '\n';
         file.close();
         if (!file) {
             error = "failed while writing configuration file";

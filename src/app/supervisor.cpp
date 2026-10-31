@@ -35,7 +35,8 @@ constexpr std::string_view kUsage =
     "       shatter status [engine]\n"
     "       shatter stop [engine|profile]\n"
     "       shatter list <in|out|all>\n"
-    "       shatter set fader <app|stream|capture|output> <name-or-id> <delta-dB|-inf>\n"
+    "       shatter set fader <app|stream|capture|output> <name-or-id> <dB|-inf>\n"
+    "       shatter inc fader <app|stream|capture|output> <name-or-id> <delta-dB>\n"
     "       shatter fader status\n"
     "       shatter set gain <app|stream|output> <name-or-id> <decibels>\n"
     "       shatter set gain capture <decibels>\n"
@@ -170,6 +171,11 @@ int run_cli(int argc, char** argv)
         normalized.emplace_back("--fader-status");
     } else if (arg(1) == "set" && arg(2) == "fader" && argc == 6) {
         normalized.emplace_back("--set-fader");
+        normalized.emplace_back(argv[3]);
+        normalized.emplace_back(argv[4]);
+        normalized.emplace_back(argv[5]);
+    } else if (arg(1) == "inc" && arg(2) == "fader" && argc == 6) {
+        normalized.emplace_back("--inc-fader");
         normalized.emplace_back(argv[3]);
         normalized.emplace_back(argv[4]);
         normalized.emplace_back(argv[5]);
@@ -367,28 +373,32 @@ int run_cli(int argc, char** argv)
             return 0;
         }
 
-        if (argc == 5 && std::string_view(argv[1]) == "--set-fader") {
+        if (argc == 5 && (std::string_view(argv[1]) == "--set-fader" ||
+                          std::string_view(argv[1]) == "--inc-fader")) {
+            const bool relative = std::string_view(argv[1]) == "--inc-fader";
             const std::string_view scope(argv[2]);
             const std::string_view amount(argv[4]);
             if (scope != "app" && scope != "stream" && scope != "capture" && scope != "output") {
                 std::cerr << "Fader scope must be app, stream, capture, or output.\n";
                 return 2;
             }
-            std::string delta = "-inf";
-            if (amount != "-inf") {
+            std::string value = "-inf";
+            if (relative || amount != "-inf") {
                 std::string_view numeric = amount;
                 if (numeric.starts_with('+')) numeric.remove_prefix(1);
                 float decibels = 0.0F;
                 const auto [end, error] = std::from_chars(numeric.data(), numeric.data() + numeric.size(), decibels);
                 if (numeric.empty() || error != std::errc{} || end != numeric.data() + numeric.size() ||
                     !std::isfinite(decibels)) {
-                    std::cerr << "Fader increment must be a finite number of dB or -inf.\n";
+                    std::cerr << (relative ? "Fader increment must be a finite number of dB.\n"
+                                           : "Fader level must be a finite number of dB or -inf.\n");
                     return 2;
                 }
-                delta = std::to_string(decibels);
+                value = std::to_string(decibels);
             }
             std::ostringstream command_builder;
-            command_builder << "FADER " << scope << ' ' << std::quoted(argv[3]) << ' ' << delta;
+            command_builder << (relative ? "FADER-INC " : "FADER-SET ")
+                            << scope << ' ' << std::quoted(argv[3]) << ' ' << value;
             const std::string response = shatter::api::request(command_builder.str());
             if (response.empty()) {
                 std::cerr << "Shatter engine is unavailable; run `shatter start` first.\n";

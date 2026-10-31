@@ -81,20 +81,22 @@ void PipeWireEngine::handle_playback_node(std::uint32_t node_id, NodeInfo node)
         stream->name = node.name.empty() ? node.description : node.name;
         stream->original_name = stream->name;
         stream->application = node.application;
+        for (const auto& saved : loaded_show_.streams) {
+            if (saved.app_identity == node.identity && saved.original_name == stream->original_name) {
+                stream->name = saved.name;
+                stream->target_gain.store(std::pow(10.0F, saved.gain_db / 20.0F));
+                stream->muted.store(saved.muted);
+                if (saved.has_output_sends)
+                    stream->output_mask.store(output_mask_for_identities(saved.output_identities));
+                break;
+            }
+        }
         if (const auto saved = playback_route_state_.find(
                 playback_route_key(node.identity, stream->original_name)); saved != playback_route_state_.end()) {
             stream->name = saved->second.name;
             stream->target_gain.store(saved->second.gain, std::memory_order_relaxed);
             stream->muted.store(saved->second.muted, std::memory_order_relaxed);
             stream->output_mask.store(saved->second.output_mask, std::memory_order_relaxed);
-        }
-        for (const auto& saved : loaded_show_.streams) {
-            if (saved.app_identity == node.identity && saved.original_name == stream->original_name) {
-                stream->name = saved.name;
-                stream->target_gain.store(std::pow(10.0F, saved.gain_db / 20.0F));
-                stream->muted.store(saved.muted);
-                break;
-            }
         }
         stream->sink_name = "shatter.stream." + std::to_string(node_id);
         stream->events.version = PW_VERSION_STREAM_EVENTS;

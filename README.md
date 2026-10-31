@@ -45,7 +45,8 @@ shatter list all
 shatter set gain app Brave 0
 shatter set gain stream Brave-1 0
 shatter set gain output Headphones -3
-shatter set fader app Brave +6
+shatter set fader app Brave -6
+shatter inc fader app Brave +6
 shatter set fader app Brave -inf
 shatter fader status
 shatter set mute app Brave on

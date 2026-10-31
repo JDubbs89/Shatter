@@ -60,7 +60,7 @@ wireplumber_pid=$!
 sleep 0.5
 pw-cli create-node adapter '{ factory.name = support.null-audio-sink node.name = shatter-test-speakers node.description = "Shatter Test Speakers" media.class = Audio/Sink audio.position = [ FL FR ] object.linger = true }' >/dev/null
 pw-cli create-node adapter '{ factory.name = support.null-audio-sink node.name = shatter-test-anchor node.description = "Shatter Test Anchor" media.class = Audio/Sink audio.position = [ FL FR ] object.linger = true }' >/dev/null
-pw-cli create-node adapter '{ factory.name = support.null-audio-sink node.name = shatter-test-headphones node.description = "Shatter Test Headphones" device.serial = shatter-test-headphones-serial media.class = Audio/Sink audio.position = [ FL FR ] object.linger = true }' >/dev/null
+pw-cli create-node adapter '{ factory.name = support.null-audio-sink node.name = shatter-test-headphones node.description = "Shatter Test Headphones" device.serial = shatter-test-headphones-serial object.path = shatter-test-headphones-path media.class = Audio/Sink audio.position = [ FL FR ] object.linger = true }' >/dev/null
 sleep 0.3
 sink_id=$(wpctl status -n | awk '/shatter-test-speakers/ { for (i=1; i<=NF; ++i) if ($i ~ /^[0-9]+\.$/) { id=$i; sub(/\.$/, "", id); print id; exit } }')
 anchor_sink_id=$(wpctl status -n | awk '/shatter-test-anchor/ { for (i=1; i<=NF; ++i) if ($i ~ /^[0-9]+\.$/) { id=$i; sub(/\.$/, "", id); print id; exit } }')
@@ -136,25 +136,25 @@ if [ -z "$app_a_id" ]; then
     exit 1
 fi
 
-"$binary" set fader app "$app_a_id" +20
+"$binary" inc fader app "$app_a_id" +20
 fader_status=$("$binary" fader status)
 case "$fader_status" in
-    *"Channel name"*"Fader position"*"TestAppA (app)"*"+12.0 dB"*) ;;
+    *"Channel name"*"Fader position"*"TestAppA"*"+12.0 dB"*) ;;
     *) echo "fader increment did not clamp at +12 dB or status table is incomplete: $fader_status" >&2; exit 1 ;;
 esac
-"$binary" set fader app "$app_a_id" -20
+"$binary" inc fader app "$app_a_id" -20
 fader_status=$("$binary" fader status)
 case "$fader_status" in
-    *"TestAppA (app)"*"-8.0 dB"*) ;;
+    *"TestAppA"*"-8.0 dB"*) ;;
     *) echo "fader decrement was not relative to the current level: $fader_status" >&2; exit 1 ;;
 esac
 "$binary" set fader app "$app_a_id" -inf
 fader_status=$("$binary" fader status)
 case "$fader_status" in
-    *"TestAppA (app)"*"-inf"*) ;;
+    *"TestAppA"*"-inf"*) ;;
     *) echo "-inf did not put the app fader at its minimum: $fader_status" >&2; exit 1 ;;
 esac
-"$binary" set fader app "$app_a_id" +60
+"$binary" inc fader app "$app_a_id" +60
 
 if "$binary" --profile-stop >/dev/null 2>&1; then
     echo "expected profile stop without a running profile to fail" >&2
@@ -238,15 +238,15 @@ if [ -z "$stream_a_id" ]; then
     echo "app playback stream ID was not listed" >&2
     exit 1
 fi
-"$binary" set fader stream "$stream_a_id" +20
-"$binary" set fader stream "$stream_a_id" -20
+"$binary" inc fader stream "$stream_a_id" +20
+"$binary" inc fader stream "$stream_a_id" -20
 fader_status=$("$binary" fader status)
 case "$fader_status" in
-    *"(stream)"*"-8.0 dB"*) ;;
+    *"pw-play"*"-8.0 dB"*) ;;
     *) echo "playback-stream fader did not apply relative increments: $fader_status" >&2; exit 1 ;;
 esac
 "$binary" set fader stream "$stream_a_id" -inf
-"$binary" set fader stream "$stream_a_id" +60
+"$binary" inc fader stream "$stream_a_id" +60
 "$binary" --set-gain stream "$stream_a_id" -20
 "$binary" --set-mute stream "$stream_a_id" on
 "$binary" --set-mute stream "$stream_a_id" off
@@ -267,20 +267,20 @@ if "$binary" make out shatter.speakers >/dev/null 2>&1; then
     exit 1
 fi
 "$binary" make out "Headphone Monitor"
-"$binary" set fader output "Headphone Monitor" +20
+"$binary" inc fader output "Headphone Monitor" +20
 fader_status=$("$binary" fader status)
 case "$fader_status" in
-    *"Headphone Monitor (output)"*"+12.0 dB"*) ;;
+    *"Headphone Monitor"*"+12.0 dB"*) ;;
     *) echo "output fader was missing or did not clamp at +12 dB: $fader_status" >&2; exit 1 ;;
 esac
-"$binary" set fader output "Headphone Monitor" -20
+"$binary" inc fader output "Headphone Monitor" -20
 fader_status=$("$binary" fader status)
 case "$fader_status" in
-    *"Headphone Monitor (output)"*"-8.0 dB"*) ;;
+    *"Headphone Monitor"*"-8.0 dB"*) ;;
     *) echo "output fader did not apply relative increments: $fader_status" >&2; exit 1 ;;
 esac
 "$binary" set fader output "Headphone Monitor" -inf
-"$binary" set fader output "Headphone Monitor" +60
+"$binary" inc fader output "Headphone Monitor" +60
 "$binary" assign out "Headphone Monitor" "sink-$anchor_sink_id"
 "$binary" assign out "Headphone Monitor" "sink-$headphones_sink_id"
 "$binary" assign app "$app_a_id" "Headphone Monitor"
@@ -299,7 +299,7 @@ if [ "$reconnecting" -ne 1 ]; then
     echo "removed playback sink was not reported as reconnecting" >&2
     exit 1
 fi
-pw-cli create-node adapter '{ factory.name = support.null-audio-sink node.name = shatter-test-headphones node.description = "Shatter Test Headphones" device.serial = shatter-test-headphones-serial media.class = Audio/Sink audio.position = [ FL FR ] object.linger = true }' >/dev/null
+pw-cli create-node adapter '{ factory.name = support.null-audio-sink node.name = shatter-test-headphones node.description = "Shatter Test Headphones" device.serial = shatter-test-headphones-serial object.path = shatter-test-headphones-path media.class = Audio/Sink audio.position = [ FL FR ] object.linger = true }' >/dev/null
 headphones_sink_id=
 for attempt in $(seq 1 50); do
     headphones_sink_id=$(wpctl status -n | awk '/shatter-test-headphones/ { for (i=1; i<=NF; ++i) if ($i ~ /^[0-9]+\.$/) { id=$i; sub(/\.$/, "", id); print id; exit } }')
@@ -413,6 +413,72 @@ rms = math.sqrt(sum(sample * sample for sample in samples) / len(samples)) if sa
 if rms < 0.005:
     raise SystemExit("named output did not deliver audio to its second sink: rms=%s" % rms)
 PY
+# Keep the system-default sink as the output's primary target; headphones are an explicit secondary route.
+"$binary" unassign out "Headphone Monitor" "sink-$headphones_sink_id"
+"$binary" assign out "Headphone Monitor" "sink-$headphones_sink_id"
+"$binary" save show routes
+config_file="$XDG_CONFIG_HOME/shatter/routes.conf"
+grep -F 'O 1 "shatter.output.1" "Headphone Monitor"' "$config_file" >/dev/null || {
+    echo "saved show omitted the output name or generated identity" >&2; cat "$config_file" >&2; exit 1;
+}
+grep -F 'B "shatter.output.1" "shatter-test-headphones-path" "shatter-test-headphones"' "$config_file" >/dev/null || {
+    echo "saved show omitted the stable physical sink identity" >&2; cat "$config_file" >&2; exit 1;
+}
+"$binary" delete out "Headphone Monitor"
+cp "$config_file" "$test_root/routes.conf"
+sed 's/"shatter-test-headphones-path" "shatter-test-headphones"/"missing-device-path" "missing-device"/' \
+    "$test_root/routes.conf" >"$config_file"
+"$binary" load show routes
+output_listing=$("$binary" list out)
+case "$output_listing" in
+    *"Headphone Monitor"*"reconnecting"*) ;;
+    *) echo "loading a show did not retain its missing physical sink binding: $output_listing" >&2; exit 1 ;;
+esac
+mv "$test_root/routes.conf" "$config_file"
+"$binary" load show routes
+input_listing=$("$binary" list in)
+case "$input_listing" in
+    *"TestAppA"*"Headpho..."*"TestAppA"*"Headpho..."*) ;;
+    *) echo "loading a show did not restore active app and stream sends: $input_listing" >&2; exit 1 ;;
+esac
+"$binary" --set-gain stream "$stream_a_id" -7
+"$binary" --set-mute stream "$stream_a_id" on
+"$binary" save show inactive-stream
+grep -F 'S "app-name:TestAppA" "pw-play" "pw-play" -7 1 2 "shatter.speakers" "shatter.output.1"' \
+    "$XDG_CONFIG_HOME/shatter/inactive-stream.conf" >/dev/null || {
+    echo "saved inactive playback stream omitted its output send" >&2
+    cat "$XDG_CONFIG_HOME/shatter/inactive-stream.conf" >&2
+    exit 1
+}
+"$binary" --set-gain stream "$stream_a_id" 0
+"$binary" --set-mute stream "$stream_a_id" off
+headphones_sink_id=
+for attempt in $(seq 1 50); do
+    headphones_sink_id=$(wpctl status -n | awk '/shatter-test-headphones/ { for (i=1; i<=NF; ++i) if ($i ~ /^[0-9]+\.$/) { id=$i; sub(/\.$/, "", id); print id; exit } }')
+    output_listing=$("$binary" list out)
+    if [ -n "$headphones_sink_id" ] && printf '%s\n' "$output_listing" | awk -v sink="sink-$headphones_sink_id" \
+        '/Headphone Monitor/ && index($0, sink) { found=1 } END { exit !found }'; then break; fi
+    headphones_sink_id=
+    sleep 0.1
+done
+if [ -z "$headphones_sink_id" ]; then
+    echo "loaded show did not rebind its saved sink by stable identity: $output_listing" >&2
+    exit 1
+fi
+reconnected_link=0
+for attempt in $(seq 1 50); do
+    if pw-link -l | grep -A1 'shatter-test-headphones:playback_FL' | grep -q 'shatter.output.1:output_FL' &&
+       pw-link -l | grep -A1 'shatter-test-headphones:playback_FR' | grep -q 'shatter.output.1:output_FR'; then
+        reconnected_link=1
+        break
+    fi
+    sleep 0.1
+done
+if [ "$reconnected_link" -ne 1 ]; then
+    pw-link -l >&2
+    echo "loaded show did not restore its saved physical sink route" >&2
+    exit 1
+fi
 "$binary" unassign out "Headphone Monitor" "sink-$headphones_sink_id"
 sleep 0.3
 output_row=$(printf '%s\n' "$($binary --list-out)" | awk '/Headphone Monitor/ { print; exit }')
@@ -479,6 +545,7 @@ for attempt in $(seq 1 50); do
     sleep 0.1
 done
 
+"$binary" load show inactive-stream
 pw-play --target default -P 'application.name=TestAppA application.id=org.shatter.test.appa' "$test_root/sine.wav" >/dev/null 2>&1 &
 recreated_playback_pid=$!
 playback_pids="$playback_pids $recreated_playback_pid"
@@ -493,7 +560,7 @@ if [ "$recreated_state" != "-7.0 dB:yes" ]; then
     exit 1
 fi
 recreated_sends=$(printf '%s\n' "$recreated_stream" | awk -F'|' '{ gsub(/^[[:space:]]+|[[:space:]]+$/, "", $7); print $7 }')
-if [ "$recreated_sends" != "Headphone Monitor" ]; then
+if [ "$recreated_sends" != "speakers, Headpho..." ]; then
     echo "recreated playback stream did not restore its output send: $recreated_stream" >&2
     exit 1
 fi
