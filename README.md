@@ -1,6 +1,6 @@
 # Shatter
 
-A single-user desktop mixer daemon for persistent application and device routing. Linux with PipeWire is the supported audio target. Windows builds can run the command server and lifecycle with audio explicitly unavailable while a native audio backend is developed.
+A single-user desktop mixer daemon for persistent application and device routing. Linux with PipeWire is the full audio target. A Linux PulseAudio backend prototype supports listing active playback streams and sinks and moving active application streams between sinks. Windows builds can run the command server and lifecycle with audio explicitly unavailable while a native audio backend is developed.
 
 ## Project status
 
@@ -15,14 +15,14 @@ This repository is an early prototype. Shatter groups PipeWire playback streams 
 
 ## Build
 
-The Linux PipeWire build requires CMake, a C++20 compiler, pkg-config, and PipeWire development headers. On Fedora, install the PipeWire headers with `sudo dnf install pipewire-devel`.
+The Linux PipeWire build requires CMake, a C++20 compiler, pkg-config, and PipeWire development headers. On Fedora, install the PipeWire headers with `sudo dnf install pipewire-devel`. The PulseAudio prototype requires `pactl` at build and runtime and does not require PulseAudio development headers.
 
 ```sh
 cmake -S . -B build
 cmake --build build
 ```
 
-The platform and audio backend are selected independently with `SHATTER_PLATFORM` and `SHATTER_AUDIO_BACKEND`. Linux defaults to the PipeWire backend. Windows defaults to `NONE` and does not require PipeWire; audio commands report that no backend is configured. PipeWire is currently supported only on Linux.
+The platform and audio backend are selected independently with `SHATTER_PLATFORM` and `SHATTER_AUDIO_BACKEND`. Linux defaults to the PipeWire backend. Windows defaults to `NONE` and does not require PipeWire; audio commands report that no backend is configured. PipeWire and PulseAudio are currently supported only on Linux.
 
 ```powershell
 cmake -S . -B build -DSHATTER_PLATFORM=WINDOWS -DSHATTER_AUDIO_BACKEND=NONE `
@@ -34,13 +34,27 @@ Linux may also build the control service without an audio backend using `-DSHATT
 
 ## Install the local command
 
-On Linux, run the repository install script to build and install `shatter` into `~/.local/bin`:
+Run the build-install script to select the platform and audio backend, build only the selected implementation, and install `shatter`:
 
 ```sh
-sh install.sh
+sh build-install.sh --platform linux --audio-backend pipewire
 ```
 
-On Windows, configure and build with CMake as shown above, then install with `cmake --install build --config Release`.
+`--platform` accepts `auto`, `linux`, or `windows`; `--audio-backend` accepts `auto`, `pipewire`, `pulseaudio`, or `none`. `auto` uses the native platform and its default backend (PipeWire on Linux, no audio backend on Windows). The platform must match the native toolchain; this script does not cross-compile.
+
+For a Windows build from a Windows shell with CMake available:
+
+```sh
+sh build-install.sh --platform windows --audio-backend none
+```
+
+The Windows install prefix defaults to `%LOCALAPPDATA%/Programs/Shatter`. Set `SHATTER_INSTALL_PREFIX` to choose a different location. Linux installs to `~/.local` by default.
+
+### PulseAudio playback routing prototype
+
+Install with `sh build-install.sh --platform linux --audio-backend pulseaudio`. Shatter requires `pactl` and a running PulseAudio-compatible server. Use `shatter list in` and `shatter list out`, then route currently active streams with `shatter assign app <application-name-or-binary> <sink-name-or-description>`. `shatter unassign app <application-name-or-binary> <sink>` returns matching active streams to the default sink.
+
+This prototype only moves active playback streams. It does not persist routing for future streams or implement saved shows, capture routing, custom mixer outputs, gain, mute, sends, stream rename, or profiling. The PipeWire backend remains the full-featured Linux implementation.
 
 With the Linux PipeWire backend, the background engine discovers application playback streams and assigns each stream to a per-application channel. Use `shatter list in` to find app names, channel IDs, and stream IDs. Gain and mute accept either the current user-facing name or the corresponding ID. Rename an app channel or stream to set a display alias; this does not change app grouping or audio processing. Names must match exactly; if a name is ambiguous, use the listed Shatter ID. Stream selectors identify currently active streams and can change after a restart. Quote names that contain spaces.
 
