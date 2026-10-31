@@ -105,6 +105,13 @@ private:
         std::array<AudioRingBuffer, max_output_channels> send_audio;
     };
 
+    struct PlaybackRouteState {
+        std::string name;
+        float gain = 1.0F;
+        bool muted = false;
+        std::uint32_t output_mask = 0;
+    };
+
     struct CaptureChannel {
         pw_stream* source_stream = nullptr;
         spa_hook listener{};
@@ -136,6 +143,7 @@ private:
         std::size_t sink_count = 0;
         std::array<std::uint32_t, 8> assigned_sink_node_ids{};
         std::array<std::string, 8> assigned_sink_names{};
+        std::array<std::string, 8> assigned_sink_identities{};
         std::size_t assigned_sink_count = 0;
         float shutdown_fade_gain = 1.0F;
         std::uint32_t shutdown_fade_frames_remaining = 0;
@@ -171,6 +179,7 @@ private:
         std::string application_id;
         std::string process_binary;
         std::string identity;
+        std::string device_identity;
         std::size_t channel_index = max_app_channels;
     };
     struct LinkInfo {
@@ -232,6 +241,7 @@ private:
     AppChannel* find_channel_locked(std::string_view channel_id);
     AppChannel* resolve_channel_locked(std::string_view selector, std::string& error);
     PlaybackStream* resolve_stream_locked(std::string_view selector, std::string& error);
+    std::string playback_route_key(std::string_view app_identity, std::string_view original_name) const;
     void run_loop();
     void cleanup();
 
@@ -255,6 +265,7 @@ private:
     std::vector<ManagedLink> managed_links_;
     std::unordered_map<std::string, std::size_t> channel_by_identity_;
     std::unordered_map<std::uint32_t, std::size_t> stream_by_node_;
+    std::unordered_map<std::string, PlaybackRouteState> playback_route_state_;
     std::array<AppChannel, max_app_channels> app_channels_{};
     std::array<PlaybackStream, max_playback_streams> playback_streams_{};
     std::array<OutputChannel, max_output_channels> output_channels_{};

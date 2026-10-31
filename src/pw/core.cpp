@@ -84,7 +84,11 @@ void PipeWireEngine::on_global(void* data, std::uint32_t id, std::uint32_t,
                 bool pending = false;
                 for (std::size_t i = 0; i < output.assigned_sink_count; ++i)
                     if (output.assigned_sink_node_ids[i] == PW_ID_ANY &&
-                        output.assigned_sink_names[i] == sink->second.name) pending = true;
+                        ((!output.assigned_sink_identities[i].empty() &&
+                          output.assigned_sink_identities[i] == sink->second.device_identity) ||
+                         ((output.assigned_sink_identities[i].empty() ||
+                           sink->second.device_identity.empty()) &&
+                          output.assigned_sink_names[i] == sink->second.name))) pending = true;
                 if (pending) {
                     std::string route_error;
                     engine.assign_output_sink_locked(output.name, sink->second.name, true, route_error);
@@ -112,6 +116,10 @@ void PipeWireEngine::on_global(void* data, std::uint32_t id, std::uint32_t,
     node.media_class = media_class;
     if (const char* name = spa_dict_lookup(props, PW_KEY_NODE_NAME)) node.name = name;
     if (const char* description = spa_dict_lookup(props, PW_KEY_NODE_DESCRIPTION)) node.description = description;
+    if (const char* serial = spa_dict_lookup(props, PW_KEY_DEVICE_SERIAL)) node.device_identity = serial;
+    if (node.device_identity.empty()) {
+        if (const char* path = spa_dict_lookup(props, PW_KEY_OBJECT_PATH)) node.device_identity = path;
+    }
     if (const char* application = spa_dict_lookup(props, PW_KEY_APP_NAME)) node.application = application;
     if (const char* app_id = spa_dict_lookup(props, PW_KEY_APP_ID)) node.application_id = app_id;
     if (const char* binary = spa_dict_lookup(props, PW_KEY_APP_PROCESS_BINARY)) node.process_binary = binary;
@@ -126,6 +134,34 @@ void PipeWireEngine::on_global(void* data, std::uint32_t id, std::uint32_t,
 
     std::lock_guard lock(engine.nodes_mutex_);
     engine.nodes_[id] = std::move(node);
+    const auto added = engine.nodes_.find(id);
+    if (added != engine.nodes_.end() && added->second.media_class == "Audio/Sink") {
+        const bool has_input_port = std::any_of(engine.ports_.begin(), engine.ports_.end(),
+            [id](const auto& entry) { return entry.second.node_id == id && entry.second.input; });
+        if (has_input_port) {
+            for (auto& output : engine.output_channels_) {
+                if (!output.in_use) continue;
+                const bool pending = std::any_of(
+                    output.assigned_sink_node_ids.begin(),
+                    output.assigned_sink_node_ids.begin() + output.assigned_sink_count,
+                    [](std::uint32_t sink_id) { return sink_id == PW_ID_ANY; });
+                if (!pending) continue;
+                bool matching_route = false;
+                for (std::size_t index = 0; index < output.assigned_sink_count; ++index) {
+                    if (output.assigned_sink_node_ids[index] != PW_ID_ANY) continue;
+                    const auto& identity = output.assigned_sink_identities[index];
+                    matching_route = (!identity.empty() && identity == added->second.device_identity) ||
+                        ((identity.empty() || added->second.device_identity.empty()) &&
+                         output.assigned_sink_names[index] == added->second.name);
+                    if (matching_route) break;
+                }
+                if (matching_route) {
+                    std::string route_error;
+                    engine.assign_output_sink_locked(output.name, added->second.name, true, route_error);
+                }
+            }
+        }
+    }
     engine.refresh_output_link_locked();
 }
 
@@ -148,7 +184,15 @@ void PipeWireEngine::on_global_remove(void* data, std::uint32_t id)
         const auto stream = engine.stream_by_node_.find(id);
         if (stream != engine.stream_by_node_.end()) {
             removed = &engine.playback_streams_[stream->second];
+            const auto app_identity = engine.app_channels_[removed->channel_index].identity;
+            engine.playback_route_state_[engine.playback_route_key(app_identity, removed->original_name)] = {
+                removed->name,
+                removed->target_gain.load(std::memory_order_relaxed),
+                removed->muted.load(std::memory_order_relaxed),
+                removed->output_mask.load(std::memory_order_relaxed)
+            };
             removed->active.store(false, std::memory_order_release);
+            removed->in_use = false;
             removed->mixer_users.fetch_or(kMixerClosed, std::memory_order_acq_rel);
             engine.stream_by_node_.erase(stream);
         }
@@ -180,6 +224,7 @@ void PipeWireEngine::on_global_remove(void* data, std::uint32_t id)
         for (auto& ring : removed->audio) ring.discard_all();
         std::lock_guard lock(engine.nodes_mutex_);
         removed->name.clear();
+        removed->original_name.clear();
         removed->application.clear();
         removed->sink_name.clear();
         removed->node_id = PW_ID_ANY;

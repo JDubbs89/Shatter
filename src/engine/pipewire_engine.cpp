@@ -894,6 +894,10 @@ void PipeWireEngine::destroy_capture_stream()
 void PipeWireEngine::update_playback_stream_state(PlaybackStream& stream, pw_stream_state state,
                                                   const char* error)
 {
+    if (!stream.in_use || stream.node_id == PW_ID_ANY) {
+        stream.active.store(false, std::memory_order_release);
+        return;
+    }
     if (stream_is_ready(state)) {
         stream.active.store(true, std::memory_order_release);
         if (default_metadata_ != nullptr) {
@@ -1003,6 +1007,12 @@ PipeWireEngine::PlaybackStream* PipeWireEngine::resolve_stream_locked(std::strin
     }
     if (match == nullptr) error = "unknown playback stream or name: " + std::string(selector);
     return match;
+}
+
+std::string PipeWireEngine::playback_route_key(std::string_view app_identity,
+                                               std::string_view original_name) const
+{
+    return std::string(app_identity) + '\x1f' + std::string(original_name);
 }
 
 void PipeWireEngine::run_loop()

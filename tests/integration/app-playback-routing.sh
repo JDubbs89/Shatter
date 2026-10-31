@@ -59,9 +59,11 @@ wireplumber --profile policy >"$test_root/wireplumber.log" 2>&1 &
 wireplumber_pid=$!
 sleep 0.5
 pw-cli create-node adapter '{ factory.name = support.null-audio-sink node.name = shatter-test-speakers node.description = "Shatter Test Speakers" media.class = Audio/Sink audio.position = [ FL FR ] object.linger = true }' >/dev/null
-pw-cli create-node adapter '{ factory.name = support.null-audio-sink node.name = shatter-test-headphones node.description = "Shatter Test Headphones" media.class = Audio/Sink audio.position = [ FL FR ] object.linger = true }' >/dev/null
+pw-cli create-node adapter '{ factory.name = support.null-audio-sink node.name = shatter-test-anchor node.description = "Shatter Test Anchor" media.class = Audio/Sink audio.position = [ FL FR ] object.linger = true }' >/dev/null
+pw-cli create-node adapter '{ factory.name = support.null-audio-sink node.name = shatter-test-headphones node.description = "Shatter Test Headphones" device.serial = shatter-test-headphones-serial media.class = Audio/Sink audio.position = [ FL FR ] object.linger = true }' >/dev/null
 sleep 0.3
 sink_id=$(wpctl status -n | awk '/shatter-test-speakers/ { for (i=1; i<=NF; ++i) if ($i ~ /^[0-9]+\.$/) { id=$i; sub(/\.$/, "", id); print id; exit } }')
+anchor_sink_id=$(wpctl status -n | awk '/shatter-test-anchor/ { for (i=1; i<=NF; ++i) if ($i ~ /^[0-9]+\.$/) { id=$i; sub(/\.$/, "", id); print id; exit } }')
 headphones_sink_id=$(wpctl status -n | awk '/shatter-test-headphones/ { for (i=1; i<=NF; ++i) if ($i ~ /^[0-9]+\.$/) { id=$i; sub(/\.$/, "", id); print id; exit } }')
 if [ -z "$sink_id" ]; then
     cat "$test_root/wireplumber.log" >&2
@@ -70,6 +72,10 @@ if [ -z "$sink_id" ]; then
 fi
 if [ -z "$headphones_sink_id" ]; then
     echo "isolated headphone sink was not created" >&2
+    exit 1
+fi
+if [ -z "$anchor_sink_id" ]; then
+    echo "isolated anchor sink was not created" >&2
     exit 1
 fi
 wpctl set-default "$sink_id" >/dev/null
@@ -275,15 +281,62 @@ case "$fader_status" in
 esac
 "$binary" set fader output "Headphone Monitor" -inf
 "$binary" set fader output "Headphone Monitor" +60
+"$binary" assign out "Headphone Monitor" "sink-$anchor_sink_id"
 "$binary" assign out "Headphone Monitor" "sink-$headphones_sink_id"
 "$binary" assign app "$app_a_id" "Headphone Monitor"
 "$binary" --set-gain stream "$stream_a_id" 0
-sleep 0.3
+pw-cli destroy "$headphones_sink_id" >/dev/null
+reconnecting=0
+for attempt in $(seq 1 50); do
+    output_listing=$("$binary" --list-out)
+    case "$output_listing" in
+        *"reconnecting"*) reconnecting=1; break ;;
+    esac
+    sleep 0.1
+done
+if [ "$reconnecting" -ne 1 ]; then
+    echo "$output_listing" >&2
+    echo "removed playback sink was not reported as reconnecting" >&2
+    exit 1
+fi
+pw-cli create-node adapter '{ factory.name = support.null-audio-sink node.name = shatter-test-headphones node.description = "Shatter Test Headphones" device.serial = shatter-test-headphones-serial media.class = Audio/Sink audio.position = [ FL FR ] object.linger = true }' >/dev/null
+headphones_sink_id=
+for attempt in $(seq 1 50); do
+    headphones_sink_id=$(wpctl status -n | awk '/shatter-test-headphones/ { for (i=1; i<=NF; ++i) if ($i ~ /^[0-9]+\.$/) { id=$i; sub(/\.$/, "", id); print id; exit } }')
+    if [ -n "$headphones_sink_id" ]; then
+        output_listing=$("$binary" --list-out)
+        case "$output_listing" in
+            *"sink-$headphones_sink_id"*) break ;;
+            *) headphones_sink_id= ;;
+        esac
+    fi
+    sleep 0.1
+done
+if [ -z "$headphones_sink_id" ]; then
+    echo "$output_listing" >&2
+    echo "recreated playback sink did not restore its named output binding" >&2
+    exit 1
+fi
 output_listing=$("$binary" --list-out)
 case "$output_listing" in
     *"Headphone Monitor"*"sink-$headphones_sink_id"*) ;;
     *) echo "named output sink link is missing: $output_listing" >&2; pw-link -l >&2; exit 1 ;;
 esac
+reconnected_link=0
+for attempt in $(seq 1 50); do
+    if pw-link -l | grep -A1 'shatter-test-headphones:playback_FL' | grep -q 'shatter.output.1:output_FL' &&
+       pw-link -l | grep -A1 'shatter-test-headphones:playback_FR' | grep -q 'shatter.output.1:output_FR'; then
+        reconnected_link=1
+        break
+    fi
+    sleep 0.1
+done
+if [ "$reconnected_link" -ne 1 ]; then
+    echo "$output_listing" >&2
+    pw-link -l >&2
+    echo "named output did not reconnect to its playback sink" >&2
+    exit 1
+fi
 record_monitor "$test_root/named-output.raw" 96000 shatter-test-headphones
 assert_audio_rms_at_least "$test_root/named-output.raw" 0.005 \
     "assigned app channel produced no audio at the named output sink"
@@ -360,6 +413,7 @@ if rms < 0.005:
     raise SystemExit("named output did not deliver audio to its second sink: rms=%s" % rms)
 PY
 "$binary" unassign out "Headphone Monitor" "sink-$headphones_sink_id"
+"$binary" unassign out "Headphone Monitor" "sink-$anchor_sink_id"
 sleep 0.3
 output_row=$(printf '%s\n' "$($binary --list-out)" | awk '/Headphone Monitor/ { print; exit }')
 case "$output_row" in
@@ -395,6 +449,8 @@ case "$output_listing" in
     *) ;;
 esac
 
+"$binary" --set-gain stream "$stream_a_id" -7
+"$binary" --set-mute stream "$stream_a_id" on
 kill "$initial_playback_pid"
 wait "$initial_playback_pid" 2>/dev/null || true
 removed=0
@@ -408,6 +464,51 @@ if [ "$removed" -ne 1 ]; then
     echo "removed playback stream remained assigned to its channel" >&2
     exit 1
 fi
+
+pw-play --target default -P 'application.name=TestAppB application.id=org.shatter.test.appb' "$test_root/sine.wav" >/dev/null 2>&1 &
+unrelated_playback_pid=$!
+playback_pids="$playback_pids $unrelated_playback_pid"
+inputs=$(wait_for_apps 1)
+unrelated_state=$(printf '%s\n' "$inputs" | awk -F'|' '$3 ~ /TestAppB/ && $2 ~ /\/ stream/ {
+    gsub(/^[[:space:]]+|[[:space:]]+$/, "", $4); gsub(/^[[:space:]]+|[[:space:]]+$/, "", $5);
+    print $4 ":" $5; exit
+}')
+if [ "$unrelated_state" != "0.0 dB:no" ]; then
+    echo "$inputs" >&2
+    echo "reused playback slot inherited controls from a different app: $unrelated_state" >&2
+    exit 1
+fi
+kill "$unrelated_playback_pid"
+wait "$unrelated_playback_pid" 2>/dev/null || true
+for attempt in $(seq 1 50); do
+    inputs=$("$binary" --list-in)
+    if ! printf '%s\n' "$inputs" | grep -q 'TestAppB.*\/ stream'; then break; fi
+    sleep 0.1
+done
+
+pw-play --target default -P 'application.name=TestAppA application.id=org.shatter.test.appa' "$test_root/sine.wav" >/dev/null 2>&1 &
+recreated_playback_pid=$!
+playback_pids="$playback_pids $recreated_playback_pid"
+inputs=$(wait_for_apps 1)
+recreated_stream=$(printf '%s\n' "$inputs" | awk -F'|' -v channel="$app_a_id" 'index($0, channel " / stream") { print; exit }')
+recreated_state=$(printf '%s\n' "$recreated_stream" | awk -F'|' '{
+    gsub(/^[[:space:]]+|[[:space:]]+$/, "", $4); gsub(/^[[:space:]]+|[[:space:]]+$/, "", $5);
+    print $4 ":" $5
+}')
+if [ "$recreated_state" != "-7.0 dB:yes" ]; then
+    echo "recreated playback stream did not restore its controls: $recreated_stream" >&2
+    exit 1
+fi
+recreated_stream_id=$(printf '%s\n' "$recreated_stream" | awk -F'|' '{ row=$6; sub(/^.*\(/, "", row); sub(/\).*/, "", row); print row }')
+"$binary" --set-gain stream "$recreated_stream_id" 0
+"$binary" --set-mute stream "$recreated_stream_id" off
+kill "$recreated_playback_pid"
+wait "$recreated_playback_pid" 2>/dev/null || true
+for attempt in $(seq 1 50); do
+    inputs=$("$binary" --list-in)
+    if ! printf '%s\n' "$inputs" | grep -q "($recreated_stream_id)"; then break; fi
+    sleep 0.1
+done
 
 pw-play --target default -P 'application.name=TestAppA application.id=org.shatter.test.appa' "$test_root/sine.wav" >/dev/null 2>&1 &
 playback_pids="$playback_pids $!"

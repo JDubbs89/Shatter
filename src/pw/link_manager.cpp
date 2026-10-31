@@ -239,6 +239,7 @@ bool PipeWireEngine::make_output_locked(std::string name, std::string& error)
         output.input_users.store(0, std::memory_order_release);
         output.assigned_sink_count = 0;
         for (auto& assigned_name : output.assigned_sink_names) assigned_name.clear();
+        for (auto& identity : output.assigned_sink_identities) identity.clear();
         output.name = std::move(name);
         output.node_name = "shatter.output." + std::to_string(index);
         lock.unlock();
@@ -280,6 +281,10 @@ bool PipeWireEngine::delete_output_locked(std::string_view selector, std::string
         stream.audio[index].discard_all();
         stream.send_audio[index].discard_all();
     }
+    for (auto& [identity, route] : playback_route_state_) {
+        (void)identity;
+        route.output_mask &= ~bit;
+    }
     capture_channel_.audio[index].discard_all();
     lock.lock();
     output->in_use = false;
@@ -289,6 +294,7 @@ bool PipeWireEngine::delete_output_locked(std::string_view selector, std::string
     output->sink_count = 0;
     output->assigned_sink_count = 0;
     for (auto& assigned_name : output->assigned_sink_names) assigned_name.clear();
+    for (auto& identity : output->assigned_sink_identities) identity.clear();
     trace_output("delete.complete", output);
     return true;
 }
@@ -351,7 +357,10 @@ bool PipeWireEngine::assign_output_sink_locked(std::string_view output_selector,
     std::size_t placeholder_index = output->assigned_sink_count;
     for (std::size_t i = 0; i < output->assigned_sink_count; ++i) {
         if (output->assigned_sink_node_ids[i] == PW_ID_ANY &&
-            output->assigned_sink_names[i] == sink->name) placeholder_index = i;
+            ((!output->assigned_sink_identities[i].empty() &&
+              output->assigned_sink_identities[i] == sink->device_identity) ||
+             ((output->assigned_sink_identities[i].empty() || sink->device_identity.empty()) &&
+              output->assigned_sink_names[i] == sink->name))) placeholder_index = i;
     }
     if (assigned && route_exists) {
         error = "output channel is already assigned to playback sink: " + std::string(sink_selector);
@@ -408,10 +417,12 @@ bool PipeWireEngine::assign_output_sink_locked(std::string_view output_selector,
         {
             output->assigned_sink_node_ids[i] = output->assigned_sink_node_ids[i + 1];
             output->assigned_sink_names[i] = std::move(output->assigned_sink_names[i + 1]);
+            output->assigned_sink_identities[i] = std::move(output->assigned_sink_identities[i + 1]);
         }
         --output->assigned_sink_count;
         output->assigned_sink_node_ids[output->assigned_sink_count] = PW_ID_ANY;
         output->assigned_sink_names[output->assigned_sink_count].clear();
+        output->assigned_sink_identities[output->assigned_sink_count].clear();
         refresh_output_link_locked();
         return true;
     }
@@ -428,6 +439,7 @@ bool PipeWireEngine::assign_output_sink_locked(std::string_view output_selector,
         }
         output->assigned_sink_node_ids[0] = sink->node_id;
         output->assigned_sink_names[0] = sink->name;
+        output->assigned_sink_identities[0] = sink->device_identity;
         output->assigned_sink_count = 1;
         return true;
     }
@@ -435,13 +447,19 @@ bool PipeWireEngine::assign_output_sink_locked(std::string_view output_selector,
         std::none_of(managed_links_.begin(), managed_links_.end(), [output](const ManagedLink& link) {
             return link.output_node == output->node_id;
         })) {
-        if (default_metadata_ == nullptr || pw_metadata_set_property(default_metadata_, output->node_id,
-                "target.object", "Spa:String", sink->name.c_str()) < 0) {
-            error = "could not restore the output's primary playback sink";
+        pw_properties* properties = pw_properties_new(PW_KEY_NODE_AUTOCONNECT, "false", nullptr);
+        if (properties == nullptr) {
+            error = "could not allocate output reconnection properties";
             return false;
         }
-        output->assigned_sink_node_ids[0] = sink->node_id;
-        return true;
+        const int property_result = pw_stream_update_properties(output->stream, &properties->dict);
+        pw_properties_free(properties);
+        if (property_result < 0 || (default_metadata_ != nullptr &&
+            pw_metadata_set_property(default_metadata_, output->node_id, "target.object",
+                                     "Spa:String", "-1") < 0)) {
+            error = "could not prepare output for playback sink reconnection";
+            return false;
+        }
     }
     if (placeholder_index >= output->assigned_sink_count &&
         output->assigned_sink_count >= output->assigned_sink_node_ids.size()) {
@@ -527,9 +545,11 @@ bool PipeWireEngine::assign_output_sink_locked(std::string_view output_selector,
         managed_links_.push_back({output->node_id, created_link_sinks[i], created_links[i]});
     if (placeholder_index < output->assigned_sink_count) {
         output->assigned_sink_node_ids[placeholder_index] = sink->node_id;
+        output->assigned_sink_identities[placeholder_index] = sink->device_identity;
     } else {
         output->assigned_sink_node_ids[output->assigned_sink_count] = sink->node_id;
         output->assigned_sink_names[output->assigned_sink_count] = sink->name;
+        output->assigned_sink_identities[output->assigned_sink_count] = sink->device_identity;
         ++output->assigned_sink_count;
     }
     return true;
