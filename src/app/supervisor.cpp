@@ -34,12 +34,12 @@ constexpr std::string_view kUsage =
     "       shatter set gain capture <decibels>\n"
     "       shatter set default show <name>\n"
     "       shatter set mute <app|stream|capture|output> <name-or-id> <on|off>\n"
-    "       shatter set capture <source|send> <value>\n"
+    "       shatter set capture send <on|off>\n"
     "       shatter rename <app|stream> <old-name> <new-name>\n"
-    "       shatter make out <name>\n"
+    "       shatter make out <name> [playback|capture]\n"
     "       shatter delete out <name-or-output-id>\n"
-    "       shatter assign out <output-name-or-id> <device-name-or-id>\n"
-    "       shatter unassign out <output-name-or-id> <device-name-or-id>\n"
+    "       shatter assign <output|app|capture|stream> <source-name-or-id> <destination-name-or-id>\n"
+    "       shatter unassign <output|app|capture|stream> <source-name-or-id> <destination-name-or-id>\n"
     "       shatter assign app <app-name-or-id> <output-name-or-id>\n"
     "       shatter unassign app <app-name-or-id> <output-name-or-id>\n"
     "       shatter assign <capture|stream> <input-name-or-id> <output-name-or-id>\n"
@@ -193,13 +193,15 @@ int run_cli(int argc, char** argv)
         normalized.emplace_back(argv[2]);
         normalized.emplace_back(argv[3]);
         normalized.emplace_back(argv[4]);
-    } else if (arg(1) == "make" && arg(2) == "out" && argc == 4) {
+    } else if (arg(1) == "make" && arg(2) == "out" && (argc == 4 || argc == 5)) {
         normalized.emplace_back("--make-out");
         normalized.emplace_back(argv[3]);
+        if (argc == 5) normalized.emplace_back(argv[4]);
     } else if (arg(1) == "delete" && arg(2) == "out" && argc == 4) {
         normalized.emplace_back("--delete-out");
         normalized.emplace_back(argv[3]);
-    } else if ((arg(1) == "assign" || arg(1) == "unassign") && argc == 5 && arg(2) == "out") {
+    } else if ((arg(1) == "assign" || arg(1) == "unassign") && argc == 5 &&
+               (arg(2) == "out" || arg(2) == "output")) {
         normalized.emplace_back(arg(1) == "assign" ? "--assign-output" : "--unassign-output");
         normalized.emplace_back(argv[3]);
         normalized.emplace_back(argv[4]);
@@ -235,11 +237,12 @@ int run_cli(int argc, char** argv)
             std::cout << "Default show set to '" << argv[2] << "' for the next engine start.\n";
             return 0;
         }
-        if (argc == 3 && (std::string_view(argv[1]) == "--make-out" ||
-                          std::string_view(argv[1]) == "--delete-out")) {
+        if ((argc == 3 || (argc == 4 && std::string_view(argv[1]) == "--make-out")) &&
+            (std::string_view(argv[1]) == "--make-out" || std::string_view(argv[1]) == "--delete-out")) {
             std::ostringstream command;
             command << (std::string_view(argv[1]) == "--make-out" ? "OUTPUT-MAKE " : "OUTPUT-DELETE ")
                     << std::quoted(argv[2]);
+            if (argc == 4) command << ' ' << argv[3];
             const std::string response = shatter::api::request(command.str());
             if (response.empty()) { std::cerr << "Shatter engine is unavailable; run `shatter start` first.\n"; return 1; }
             if (response.starts_with("ERR ")) { std::cerr << response; return 1; }

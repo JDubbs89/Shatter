@@ -144,13 +144,18 @@ bool PipeWireEngine::create_output_stream(OutputChannel& output, bool autoconnec
     output.events.version = PW_VERSION_STREAM_EVENTS;
     output.events.state_changed = &PipeWireEngine::on_output_state_changed;
     output.events.process = &PipeWireEngine::on_output_process;
-    const std::string description = output.name == "speakers" ? "Shatter Speakers" : "Shatter output: " + output.name;
+    const char* media_class = output.capture_source ? "Audio/Source" : "Stream/Output/Audio";
+    const char* media_category = output.capture_source ? "Capture" : "Playback";
+    const char* media_role = output.capture_source ? "Communication" : "Production";
+    const std::string description = output.capture_source
+        ? "Shatter virtual microphone: " + output.name
+        : output.name == "speakers" ? "Shatter Speakers" : "Shatter output: " + output.name;
     pw_properties* properties = pw_properties_new(
-        PW_KEY_MEDIA_TYPE, "Audio", PW_KEY_MEDIA_CATEGORY, "Playback",
-        PW_KEY_MEDIA_ROLE, "Production", PW_KEY_MEDIA_CLASS, "Stream/Output/Audio",
+        PW_KEY_MEDIA_TYPE, "Audio", PW_KEY_MEDIA_CATEGORY, media_category,
+        PW_KEY_MEDIA_ROLE, media_role, PW_KEY_MEDIA_CLASS, media_class,
         PW_KEY_NODE_NAME, output.node_name.c_str(), PW_KEY_NODE_DESCRIPTION, description.c_str(),
-        PW_KEY_NODE_AUTOCONNECT, "true", "node.dont-fallback", "true",
-        PW_KEY_APP_NAME, "Shatter", nullptr);
+        PW_KEY_NODE_AUTOCONNECT, output.capture_source ? "false" : "true", "node.dont-fallback", "true",
+        PW_KEY_NODE_VIRTUAL, "true", PW_KEY_APP_NAME, "Shatter", nullptr);
     if (properties == nullptr) { error = "could not allocate PipeWire output properties"; return false; }
     output.stream = pw_stream_new(core_, description.c_str(), properties);
     if (output.stream == nullptr) { error = "could not create PipeWire output stream"; return false; }

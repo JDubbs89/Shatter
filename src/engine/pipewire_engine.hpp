@@ -32,6 +32,7 @@ public:
     static constexpr std::size_t max_app_channels = 1024;
     static constexpr std::size_t max_playback_streams = 128;
     static constexpr std::size_t max_output_channels = 8;
+    static constexpr std::size_t max_capture_channels = 32;
 
     PipeWireEngine() = default;
     ~PipeWireEngine() override;
@@ -49,7 +50,7 @@ public:
     bool rename_stream(std::string_view current_name, std::string new_name, std::string& error) override;
     bool set_capture_source(std::string_view source_selector, std::string& error) override;
     bool set_capture_gain_db(float decibels, std::string& error) override;
-    bool set_capture_muted(bool muted, std::string& error) override;
+    bool set_capture_muted(std::string_view capture_selector, bool muted, std::string& error) override;
     bool set_fader_db(std::string_view scope, std::string_view selector, float decibels,
                       bool minimum, std::string& error) override;
     bool adjust_fader_db(std::string_view scope, std::string_view selector, float delta_db,
@@ -58,7 +59,7 @@ public:
     bool set_output_gain_db(std::string_view output_selector, float decibels,
                             std::string& error) override;
     bool set_output_muted(std::string_view output_selector, bool muted, std::string& error) override;
-    bool make_output(std::string name, std::string& error) override;
+    bool make_output(std::string name, bool capture_source, std::string& error) override;
     bool delete_output(std::string_view selector, std::string& error) override;
     bool assign_output_destination(std::string_view output_selector,
                                    std::string_view destination_selector,
@@ -131,6 +132,11 @@ private:
     };
 
     struct CaptureChannel {
+        PipeWireEngine* engine = nullptr;
+        std::atomic<bool> in_use{false};
+        std::string name;
+        std::string identity;
+        std::string selector_id;
         pw_stream* source_stream = nullptr;
         spa_hook listener{};
         pw_stream_events events{};
@@ -156,6 +162,7 @@ private:
         RealtimeAccessGate input_gate;
         std::string name;
         std::string node_name;
+        bool capture_source = false;
         std::atomic<float> target_gain{1.0F};
         std::atomic<bool> muted{false};
         float smoothed_gain = 1.0F;
@@ -174,12 +181,6 @@ private:
         pw_stream_events events{};
     };
 
-    struct CaptureSourceRequest {
-        PipeWireEngine* engine = nullptr;
-        std::string source_selector;
-        bool succeeded = false;
-        std::string error;
-    };
     struct OutputRequest {
         PipeWireEngine* engine = nullptr;
         enum class Action { make, remove, assign_sink, assign_app, assign_input, load_config } action = Action::make;
@@ -187,6 +188,7 @@ private:
         std::string second;
         state::Show show;
         bool assigned = false;
+        bool capture_source = false;
         bool succeeded = false;
         bool completed = false;
         std::string error;
@@ -231,8 +233,6 @@ private:
     static void on_capture_source_state_changed(void* data, pw_stream_state old_state,
                                                 pw_stream_state state, const char* error);
     static void on_capture_source_process(void* data);
-    static int on_capture_source_request(spa_loop* loop, bool async, std::uint32_t sequence,
-                                         const void* data, std::size_t size, void* user_data);
     static int on_output_request(spa_loop* loop, bool async, std::uint32_t sequence,
                                  const void* data, std::size_t size, void* user_data);
     static void on_global(void* data, std::uint32_t id, std::uint32_t permissions,
@@ -240,19 +240,20 @@ private:
     static void on_global_remove(void* data, std::uint32_t id);
 
     void stream_input_process(PlaybackStream& stream);
-    void capture_source_process();
+    void capture_source_process(CaptureChannel& channel);
     void output_process(OutputChannel& output);
     void update_playback_stream_state(PlaybackStream& stream, pw_stream_state state, const char* error);
     void refresh_output_link_locked();
     bool invoke_output_request(OutputRequest& request, std::string& error);
-    bool make_output_locked(std::string name, std::string& error);
-    bool make_output_at_locked(std::string name, std::size_t slot, std::string& error);
+    bool make_output_locked(std::string name, bool capture_source, std::string& error);
+    bool make_output_at_locked(std::string name, std::size_t slot, bool capture_source, std::string& error);
     bool delete_output_locked(std::string_view selector, std::string& error);
     bool apply_config_locked(state::Show show, std::string& error);
     std::uint32_t output_mask_for_identities(const std::vector<std::string>& identities) const;
     void restore_output_routes_locked(OutputChannel& output);
     static bool is_output_destination(const NodeInfo& node);
     static std::string output_destination_name(const NodeInfo& node);
+    static std::string capture_source_name(const NodeInfo& node);
     static std::string output_destination_identity(const NodeInfo& node);
     static std::string output_destination_selector(const NodeInfo& node);
     bool assign_output_sink_locked(std::string_view output_selector, std::string_view sink_selector,
@@ -264,8 +265,9 @@ private:
     void destroy_output_stream(OutputChannel& output);
     void handle_playback_node(std::uint32_t node_id, NodeInfo node);
     void create_stream_sink(PlaybackStream& stream);
-    bool replace_capture_source(std::string_view source_selector, std::string& error);
-    void destroy_capture_stream();
+    bool add_capture_channel(const NodeInfo& source, std::string& error);
+    void destroy_capture_channel(CaptureChannel& channel, bool forget = true);
+    CaptureChannel* resolve_capture_channel_locked(std::string_view selector, std::string& error);
     void assign_stream_target(PlaybackStream& stream);
     std::size_t get_or_create_channel_locked(const NodeInfo& node);
     PlaybackStream* find_stream_locked(std::uint32_t node_id);
@@ -305,7 +307,7 @@ private:
     std::array<OutputChannel, max_output_channels> output_channels_{};
     state::Store state_store_;
     state::Show loaded_show_;
-    CaptureChannel capture_channel_{};
+    std::array<CaptureChannel, max_capture_channels> capture_channels_{};
     std::atomic<std::size_t> allocated_channels_{0};
     std::atomic<std::size_t> allocated_streams_{0};
     std::uint64_t next_stream_selector_id_ = 1;

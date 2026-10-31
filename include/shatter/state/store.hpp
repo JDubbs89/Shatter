@@ -39,12 +39,22 @@ struct OutputSetting {
     std::vector<DeviceBinding> devices;
     float gain_db = 0.0F;
     bool muted = false;
+    bool capture_source = false;
+};
+
+struct CaptureSetting {
+    std::string identity;
+    std::string name;
+    float gain_db = 0.0F;
+    bool muted = false;
+    std::vector<std::string> output_identities;
 };
 
 struct Show {
     std::vector<AppSetting> apps;
     std::vector<StreamSetting> streams;
     std::vector<OutputSetting> outputs;
+    std::vector<CaptureSetting> captures;
     std::vector<std::string> capture_output_identities;
     bool has_capture_sends = false;
     std::string capture_source_identity;

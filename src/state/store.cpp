@@ -1,5 +1,6 @@
 #include "shatter/state/store.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <fstream>
@@ -16,7 +17,9 @@ namespace {
 constexpr std::string_view kHeaderV1 = "SHATTER-CONFIG 1";
 constexpr std::string_view kHeaderV2 = "SHATTER-CONFIG 2";
 constexpr std::string_view kHeaderV3 = "SHATTER-CONFIG 3";
-constexpr std::string_view kHeader = "SHATTER-CONFIG 4";
+constexpr std::string_view kHeaderV4 = "SHATTER-CONFIG 4";
+constexpr std::string_view kHeaderV5 = "SHATTER-CONFIG 5";
+constexpr std::string_view kHeader = "SHATTER-CONFIG 6";
 constexpr float kMinimumGainDb = -60.0F;
 constexpr float kMaximumGainDb = 12.0F;
 
@@ -144,13 +147,15 @@ bool Store::load(std::string_view name, Show& show, std::string& error) const
         }
         std::string header;
         if (!std::getline(file, header) ||
-            (header != kHeader && header != kHeaderV3 && header != kHeaderV2 && header != kHeaderV1)) {
+            (header != kHeader && header != kHeaderV5 && header != kHeaderV4 && header != kHeaderV3 && header != kHeaderV2 && header != kHeaderV1)) {
             error = "unsupported or invalid configuration format";
             return false;
         }
-        const bool version_two = header == kHeaderV2 || header == kHeaderV3 || header == kHeader;
-        const bool version_three = header == kHeaderV3 || header == kHeader;
-        const bool version_four = header == kHeader;
+        const bool version_two = header == kHeaderV2 || header == kHeaderV3 || header == kHeaderV4 || header == kHeaderV5 || header == kHeader;
+        const bool version_three = header == kHeaderV3 || header == kHeaderV4 || header == kHeaderV5 || header == kHeader;
+        const bool version_four = header == kHeaderV4 || header == kHeaderV5 || header == kHeader;
+        const bool version_five = header == kHeaderV5 || header == kHeader;
+        const bool version_six = header == kHeader;
 
         Show loaded;
         std::map<std::string, std::size_t> outputs_by_identity;
@@ -220,6 +225,14 @@ bool Store::load(std::string_view name, Show& show, std::string& error) const
                     }
                     item.muted = muted != 0;
                 }
+                if (version_five) {
+                    int capture_source = 0;
+                    if (!(row >> capture_source) || (capture_source != 0 && capture_source != 1)) {
+                        error = "invalid output channel type in configuration";
+                        return false;
+                    }
+                    item.capture_source = capture_source != 0;
+                }
                 outputs_by_identity[item.identity] = loaded.outputs.size();
                 loaded.outputs.push_back(std::move(item));
             } else if ((type == 'B' && header == kHeaderV2) || (type == 'D' && version_three)) {
@@ -263,6 +276,28 @@ bool Store::load(std::string_view name, Show& show, std::string& error) const
                     error = "invalid capture device identity in configuration";
                     return false;
                 }
+            } else if (type == 'I' && version_six) {
+                CaptureSetting item;
+                std::size_t send_count = 0;
+                if (!(row >> std::quoted(item.identity) >> std::quoted(item.name) >> item.gain_db >> muted >> send_count) ||
+                    item.identity.empty() || item.name.empty() || !valid_gain(item.gain_db) ||
+                    (muted != 0 && muted != 1) ||
+                    std::any_of(loaded.captures.begin(), loaded.captures.end(), [&](const auto& prior) {
+                        return prior.identity == item.identity;
+                    })) {
+                    error = "invalid or duplicate capture channel entry in configuration";
+                    return false;
+                }
+                item.muted = muted != 0;
+                for (std::size_t i = 0; i < send_count; ++i) {
+                    std::string identity;
+                    if (!(row >> std::quoted(identity)) || identity.empty()) {
+                        error = "invalid capture output send list in configuration";
+                        return false;
+                    }
+                    item.output_identities.push_back(std::move(identity));
+                }
+                loaded.captures.push_back(std::move(item));
             } else {
                 error = "unknown entry in configuration";
                 return false;
@@ -302,7 +337,8 @@ bool Store::save(std::string_view name, const Show& show, std::string& error) co
             }
             if (!valid_gain(output.gain_db)) { error = "output gain is outside the supported range"; return false; }
             file << "O " << output.slot << ' ' << std::quoted(output.identity) << ' '
-                 << std::quoted(output.name) << ' ' << output.gain_db << ' ' << (output.muted ? 1 : 0) << '\n';
+                 << std::quoted(output.name) << ' ' << output.gain_db << ' ' << (output.muted ? 1 : 0)
+                 << ' ' << (output.capture_source ? 1 : 0) << '\n';
             for (const auto& device : output.devices) {
                 if (device.name.empty()) { error = "output device name cannot be empty"; return false; }
                 file << "D " << std::quoted(output.identity) << ' ' << std::quoted(device.identity)
@@ -337,6 +373,17 @@ bool Store::save(std::string_view name, const Show& show, std::string& error) co
         file << '\n';
         if (!show.capture_source_identity.empty())
             file << "M " << std::quoted(show.capture_source_identity) << '\n';
+        for (const auto& capture : show.captures) {
+            if (capture.identity.empty() || capture.name.empty() || !valid_gain(capture.gain_db)) {
+                error = "capture channel identity or gain is invalid";
+                return false;
+            }
+            file << "I " << std::quoted(capture.identity) << ' ' << std::quoted(capture.name) << ' '
+                 << capture.gain_db << ' '
+                 << (capture.muted ? 1 : 0) << ' ' << capture.output_identities.size();
+            for (const auto& identity : capture.output_identities) file << ' ' << std::quoted(identity);
+            file << '\n';
+        }
         file.close();
         if (!file) {
             error = "failed while writing configuration file";

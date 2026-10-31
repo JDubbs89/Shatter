@@ -44,13 +44,18 @@ bool PipeWireEngine::is_output_destination(const NodeInfo& node)
 
 std::string PipeWireEngine::output_destination_name(const NodeInfo& node)
 {
-    return node.name.empty() ? node.description : node.name;
+    return node.description.empty() ? node.name : node.description;
+}
+
+std::string PipeWireEngine::capture_source_name(const NodeInfo& node)
+{
+    return node.description.empty() ? node.name : node.description;
 }
 
 std::string PipeWireEngine::output_destination_identity(const NodeInfo& node)
 {
     if (node.media_class == "Stream/Input/Audio") {
-        const std::string name = output_destination_name(node);
+        const std::string name = node.name.empty() ? node.description : node.name;
         const auto identity = stable_application_input_identity(node.application_id, node.process_binary,
                                                                  node.application, name);
         return identity.empty() ? "app-input-runtime:" + name + ":" + std::to_string(node.node_id) : identity;
@@ -63,6 +68,37 @@ std::string PipeWireEngine::output_destination_selector(const NodeInfo& node)
 {
     const auto identity = output_destination_identity(node);
     return make_stable_selector_id(node.media_class == "Stream/Input/Audio" ? "input" : "device", identity);
+}
+
+PipeWireEngine::CaptureChannel* PipeWireEngine::resolve_capture_channel_locked(
+    std::string_view selector, std::string& error)
+{
+    if (selector == "capture" || selector_name_matches(selector, "Microphone")) {
+        CaptureChannel* only = nullptr;
+        for (auto& channel : capture_channels_) {
+            if (!channel.in_use) continue;
+            if (only != nullptr) {
+                error = "multiple capture channels are available; use a listed capture name or ID";
+                return nullptr;
+            }
+            only = &channel;
+        }
+        if (only == nullptr) error = "no capture channels are available";
+        return only;
+    }
+    CaptureChannel* match = nullptr;
+    for (auto& channel : capture_channels_) {
+        if (!channel.in_use) continue;
+        if (channel.selector_id != selector && !selector_name_matches(channel.name, selector) &&
+            channel.identity != selector) continue;
+        if (match != nullptr) {
+            error = "capture selector is ambiguous; use the listed capture ID";
+            return nullptr;
+        }
+        match = &channel;
+    }
+    if (match == nullptr) error = "unknown capture channel: " + std::string(selector);
+    return match;
 }
 
 void PipeWireEngine::refresh_output_link_locked()
@@ -89,12 +125,13 @@ void PipeWireEngine::refresh_output_link_locked()
     output_linked_.store(speaker_playback_linked, std::memory_order_relaxed);
 }
 
-bool PipeWireEngine::make_output(std::string name, std::string& error)
+bool PipeWireEngine::make_output(std::string name, bool capture_source, std::string& error)
 {
     OutputRequest request{};
     request.engine = this;
     request.action = OutputRequest::Action::make;
     request.first = std::move(name);
+    request.capture_source = capture_source;
     return invoke_output_request(request, error);
 }
 
@@ -184,7 +221,7 @@ int PipeWireEngine::on_output_request(spa_loop*, bool, std::uint32_t, const void
                  "action=" + std::to_string(static_cast<int>(request.action)) + " first=" + request.first);
     switch (request.action) {
     case OutputRequest::Action::make:
-        request.succeeded = engine.make_output_locked(std::move(request.first), request.error);
+        request.succeeded = engine.make_output_locked(std::move(request.first), request.capture_source, request.error);
         break;
     case OutputRequest::Action::remove:
         request.succeeded = engine.delete_output_locked(request.first, request.error);
@@ -216,10 +253,8 @@ int PipeWireEngine::on_output_request(spa_loop*, bool, std::uint32_t, const void
                 auto* stream = engine.resolve_stream_locked(selector, request.error);
                 if (stream != nullptr) mask = &stream->output_mask;
             } else if (scope == "capture") {
-                if (selector != "capture") request.error = "capture input selector must be 'capture'";
-                else if (request.assigned && !engine.capture_channel_.active.load(std::memory_order_acquire))
-                    request.error = "select an active capture source before assigning its send";
-                else mask = &engine.capture_channel_.output_mask;
+                auto* channel = engine.resolve_capture_channel_locked(selector, request.error);
+                if (channel != nullptr) mask = &channel->output_mask;
             } else request.error = "input send scope must be stream or capture";
             if (mask != nullptr) {
                 auto value = mask->load(std::memory_order_relaxed);
@@ -245,7 +280,7 @@ int PipeWireEngine::on_output_request(spa_loop*, bool, std::uint32_t, const void
     return 0;
 }
 
-bool PipeWireEngine::make_output_locked(std::string name, std::string& error)
+bool PipeWireEngine::make_output_locked(std::string name, bool capture_source, std::string& error)
 {
     std::size_t slot = max_output_channels;
     {
@@ -258,10 +293,10 @@ bool PipeWireEngine::make_output_locked(std::string name, std::string& error)
         error = "Shatter reached its output channel limit";
         return false;
     }
-    return make_output_at_locked(std::move(name), slot, error);
+    return make_output_at_locked(std::move(name), slot, capture_source, error);
 }
 
-bool PipeWireEngine::make_output_at_locked(std::string name, std::size_t slot, std::string& error)
+bool PipeWireEngine::make_output_at_locked(std::string name, std::size_t slot, bool capture_source, std::string& error)
 {
     if (name.empty() || name.size() > 128 || name.find_first_of("\r\n") != std::string::npos ||
         name.find('\0') != std::string::npos) {
@@ -291,6 +326,7 @@ bool PipeWireEngine::make_output_at_locked(std::string name, std::size_t slot, s
         output.input_generation.fetch_add(1, std::memory_order_acq_rel);
         output.engine = this;
         output.in_use = true;
+        output.capture_source = capture_source;
         output.target_gain.store(1.0F, std::memory_order_relaxed);
         output.muted.store(false, std::memory_order_relaxed);
         output.smoothed_gain = 1.0F;
@@ -325,7 +361,8 @@ bool PipeWireEngine::apply_config_locked(state::Show show, std::string& error)
             saved.identity != "shatter.output." + std::to_string(saved.slot) ||
             saved.name.empty() || saved.name.size() > 128 || saved.name == "speakers" ||
             !slots.insert(saved.slot).second || !identities.insert(saved.identity).second ||
-            !names.insert(saved.name).second || saved.devices.size() > 8) {
+            !names.insert(saved.name).second || saved.devices.size() > 8 ||
+            (saved.capture_source && !saved.devices.empty())) {
             error = "configuration contains an invalid output channel identity, name, or slot";
             return false;
         }
@@ -340,7 +377,7 @@ bool PipeWireEngine::apply_config_locked(state::Show show, std::string& error)
     }
     playback_route_state_.clear();
     for (const auto& saved : show.outputs) {
-        if (!make_output_at_locked(saved.name, saved.slot, error)) return false;
+        if (!make_output_at_locked(saved.name, saved.slot, saved.capture_source, error)) return false;
     }
 
     {
@@ -402,39 +439,48 @@ bool PipeWireEngine::apply_config_locked(state::Show show, std::string& error)
                 break;
             }
         }
-        capture_channel_.output_mask.store(loaded_show_.has_capture_sends
-            ? output_mask_for_identities(loaded_show_.capture_output_identities) : 0U,
-            std::memory_order_release);
-        capture_channel_.target_gain.store(std::pow(10.0F, loaded_show_.capture_gain_db / 20.0F),
-                                           std::memory_order_relaxed);
-        capture_channel_.muted.store(loaded_show_.capture_muted, std::memory_order_release);
-    }
-    if (!loaded_show_.capture_source_identity.empty()) {
-        std::string selector;
-        {
-            std::lock_guard lock(nodes_mutex_);
-            for (const auto& [node_id, node] : nodes_) {
-                (void)node_id;
-                if (node.media_class != "Audio/Source") continue;
-                const std::string name = output_destination_name(node);
-                if (stable_device_identity(node.device_identity, name) != loaded_show_.capture_source_identity)
-                    continue;
-                selector = make_stable_selector_id("source", loaded_show_.capture_source_identity);
-                break;
+        for (const auto& saved : loaded_show_.captures) {
+            const bool exists = std::any_of(capture_channels_.begin(), capture_channels_.end(),
+                [&](const auto& channel) { return channel.in_use && channel.identity == saved.identity; });
+            if (exists) continue;
+            auto slot = std::find_if(capture_channels_.begin(), capture_channels_.end(),
+                [](const auto& channel) { return !channel.in_use; });
+            if (slot == capture_channels_.end()) {
+                error = "configuration contains more capture channels than Shatter can restore";
+                return false;
+            }
+            slot->engine = this;
+            slot->in_use = true;
+            slot->name = saved.name;
+            slot->identity = saved.identity;
+            slot->selector_id = make_stable_selector_id("source", saved.identity);
+            slot->source_node_id = PW_ID_ANY;
+        }
+        for (auto& channel : capture_channels_) {
+            if (!channel.in_use) continue;
+            const auto saved = std::find_if(loaded_show_.captures.begin(), loaded_show_.captures.end(),
+                [&](const auto& item) { return item.identity == channel.identity; });
+            if (saved != loaded_show_.captures.end()) {
+                channel.output_mask.store(output_mask_for_identities(saved->output_identities),
+                                          std::memory_order_release);
+                channel.target_gain.store(std::pow(10.0F, saved->gain_db / 20.0F), std::memory_order_relaxed);
+                channel.muted.store(saved->muted, std::memory_order_release);
+            } else {
+                channel.output_mask.store(loaded_show_.has_capture_sends
+                    ? output_mask_for_identities(loaded_show_.capture_output_identities) : 0U,
+                    std::memory_order_release);
+                channel.target_gain.store(std::pow(10.0F, loaded_show_.capture_gain_db / 20.0F),
+                                          std::memory_order_relaxed);
+                channel.muted.store(loaded_show_.capture_muted, std::memory_order_release);
             }
         }
-        if (selector.empty()) {
-            destroy_capture_stream();
-            return true;
-        }
-        if (!replace_capture_source(selector, error)) return false;
     }
     return true;
 }
 
 void PipeWireEngine::restore_output_routes_locked(OutputChannel& output)
 {
-    if (output.node_id == PW_ID_ANY || output.assigned_sink_count == 0) return;
+    if (output.capture_source || output.node_id == PW_ID_ANY || output.assigned_sink_count == 0) return;
     std::vector<state::DeviceBinding> pending;
     std::vector<state::DeviceBinding> attached;
     std::vector<std::uint32_t> attached_node_ids;
@@ -511,7 +557,8 @@ bool PipeWireEngine::delete_output_locked(std::string_view selector, std::string
     output->input_generation.fetch_add(1, std::memory_order_acq_rel);
     for (std::size_t i = 0; i < allocated_channels_.load(std::memory_order_relaxed); ++i)
         app_channels_[i].output_mask.fetch_and(~bit, std::memory_order_release);
-    capture_channel_.output_mask.fetch_and(~bit, std::memory_order_release);
+    for (auto& channel : capture_channels_)
+        channel.output_mask.fetch_and(~bit, std::memory_order_release);
     output->linked.store(false, std::memory_order_release);
     trace_output("delete.before-destroy", output, output->node_name);
     lock.unlock();
@@ -526,7 +573,7 @@ bool PipeWireEngine::delete_output_locked(std::string_view selector, std::string
         (void)identity;
         route.output_mask &= ~bit;
     }
-    capture_channel_.audio[index].discard_all();
+    for (auto& channel : capture_channels_) channel.audio[index].discard_all();
     lock.lock();
     output->in_use = false;
     output->name.clear();
@@ -565,6 +612,10 @@ bool PipeWireEngine::assign_output_sink_locked(std::string_view output_selector,
 {
     OutputChannel* output = resolve_output_locked(output_selector, error);
     if (output == nullptr) return false;
+    if (output->capture_source) {
+        error = "capture-type output is a virtual microphone source; select it in the application's input settings";
+        return false;
+    }
     if (output->node_id == PW_ID_ANY) {
         error = "output channel is not ready on the active audio backend";
         return false;
@@ -575,7 +626,8 @@ bool PipeWireEngine::assign_output_sink_locked(std::string_view output_selector,
         if (!is_output_destination(node)) continue;
         const std::string name = output_destination_name(node);
         const bool stable_match = output_destination_selector(node) == sink_selector;
-        const bool name_match = node.name == sink_selector || node.description == sink_selector;
+        const bool name_match = selector_name_matches(node.name, sink_selector) ||
+            selector_name_matches(node.description, sink_selector);
         if (!stable_match && !name_match) continue;
         if (sink != nullptr) {
             error = "output destination selector is ambiguous; use its listed ID";

@@ -4,7 +4,7 @@ A single-user desktop mixer daemon for persistent application and device routing
 
 ## Project status
 
-This repository is an early prototype. Shatter groups PipeWire playback streams into per-application channels and provides per-stream and per-channel gain and mute controls. App channels can be sent to named output channels, including the built-in `speakers` output, which follows the default playback sink. You can create additional outputs, route them to multiple playback sinks, and control each output's gain and mute independently. A selected PipeWire capture source feeds an independent capture channel with its own gain, mute, and optional sends.
+This repository is an early prototype. Shatter groups PipeWire playback streams into per-application channels and provides per-stream and per-channel gain and mute controls. App channels can be sent to named output channels, including the built-in `speakers` output, which follows the default playback sink. You can create additional outputs, route them to multiple playback sinks, and control each output's gain and mute independently. Every available PipeWire capture source automatically gets its own input channel with independent gain, mute, meter, and sends.
 
 ## Architecture and domain
 
@@ -74,18 +74,19 @@ shatter inc fader app Brave +6
 shatter set fader app Brave -inf
 shatter fader status
 shatter set mute app Brave on
-shatter set mute capture capture on
+shatter set mute capture "USB Microphone" on
 shatter set mute output Headphones off
 shatter rename app Brave Browser
 shatter rename stream Brave-1 "Browser music"
-shatter list in # choose a capture device ID
-shatter set capture source <capture-device-id>
-shatter set gain capture -6
-shatter set capture send on
+shatter list in # capture devices appear as input channels with names and IDs
+shatter set fader capture "USB Microphone" -6
+shatter assign capture "USB Microphone" speakers
 shatter make out Headphones
-shatter assign out Headphones <device-id>
+shatter make out "Virtual Microphone" capture
+shatter assign output Headphones "Studio Headphones"
 shatter assign app Brave Headphones
 shatter unassign app Brave speakers
+shatter assign capture "USB Microphone" "Virtual Microphone"
 shatter list out
 shatter start profile
 # use audio normally
@@ -94,8 +95,8 @@ shatter stop profile
 
 The older dash-prefixed command forms remain accepted as compatibility aliases.
 
-`shatter list out` shows Shatter outputs and available playback devices. Use the stable `device-<id>` value shown there when routing an output. User-created outputs remain disconnected until you assign one to a playback device. Use `shatter unassign out <output> <device>` to detach it, and `shatter delete out <output>` to remove it.
+`shatter list out` shows Shatter outputs and available playback devices. Routing accepts a displayed device name or the stable ID shown in the listing; if names are ambiguous, use the ID. User-created playback outputs remain disconnected until you assign one to a playback device. Create a capture-type output with `shatter make out <name> capture`; it appears to applications as a virtual microphone source, which each application can select in its input settings. Every physical capture source appears as an input channel in `shatter list in`, so `shatter assign capture "USB Microphone" "Virtual Microphone"` routes it directly without selecting it first. `shatter assign output Headphones "Studio Headphones"` routes a playback output to a device. Use `shatter unassign <type> <source> <destination>` to remove a route, and `shatter delete out <output>` to remove an output channel.
 
 Profiling requires the engine's PipeWire output to be ready. The stop command prints callback timing percentiles, callback budget overruns, process CPU time, dropped and unfilled ring-buffer frames, Shatter input ring occupancy, and PipeWire's reported device delay and queued audio. Unfilled ring frames can include idle or silent streams. Callback timing measures Shatter's processing work; ring occupancy, PipeWire delay, and queued audio are separate parts of the audio path, and this summary is not an end-to-end loopback latency measurement.
 
-Gain controls range from -60 dB to +12 dB and are smoothed during playback. The capture channel's speaker send starts off and resets to off whenever its source is changed or removed. The engine creates one virtual PipeWire ingress sink for each playback stream and returns streams to ordinary PipeWire routing when stopped. On Linux, the control socket lives in `$XDG_RUNTIME_DIR/shatter/control.sock` and is accessible only to the current user. Windows uses a current-user named pipe.
+Gain controls range from -60 dB to +12 dB and are smoothed during playback. Each capture channel's sends start off. The engine creates one virtual PipeWire ingress sink for each playback stream and returns streams to ordinary PipeWire routing when stopped. On Linux, the control socket lives in `$XDG_RUNTIME_DIR/shatter/control.sock` and is accessible only to the current user. Windows uses a current-user named pipe.

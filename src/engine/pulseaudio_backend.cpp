@@ -232,7 +232,7 @@ public:
     bool rename_stream(std::string_view, std::string, std::string& error) override { return unsupported(error); }
     bool set_capture_source(std::string_view, std::string& error) override { return unsupported(error); }
     bool set_capture_gain_db(float, std::string& error) override { return unsupported(error); }
-    bool set_capture_muted(bool, std::string& error) override { return unsupported(error); }
+    bool set_capture_muted(std::string_view, bool, std::string& error) override { return unsupported(error); }
     bool set_fader_db(std::string_view, std::string_view, float, bool, std::string& error) override
     { return unsupported(error); }
     bool adjust_fader_db(std::string_view, std::string_view, float, bool, std::string& error) override
@@ -240,7 +240,7 @@ public:
     bool set_capture_speaker_send(bool, std::string& error) override { return unsupported(error); }
     bool set_output_gain_db(std::string_view, float, std::string& error) override { return unsupported(error); }
     bool set_output_muted(std::string_view, bool, std::string& error) override { return unsupported(error); }
-    bool make_output(std::string, std::string& error) override { return unsupported(error); }
+    bool make_output(std::string, bool, std::string& error) override { return unsupported(error); }
     bool delete_output(std::string_view, std::string& error) override { return unsupported(error); }
     bool assign_output_destination(std::string_view, std::string_view, bool, std::string& error) override
     { return unsupported(error); }

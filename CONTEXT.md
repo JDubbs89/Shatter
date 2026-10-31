@@ -17,12 +17,16 @@ An individual audio stream an application publishes to PipeWire; one application
 _Avoid_: Playback channel (a stream is one feed into the application channel)
 
 **Capture channel**:
-An input channel receiving audio from a physical capture device, such as a microphone.
+An automatically created input channel receiving audio from one physical capture device, such as a microphone. Each available capture device has its own gain, mute, meter, output sends, and stable selector.
 _Avoid_: Microphone destination
 
 **Output channel**:
-A named mixer destination that collects sends from input channels and delivers its mix to one or more playback sinks.
+A named mixer destination that collects sends from input channels. Its type determines whether it plays to playback sinks or exposes its mix as a virtual capture source for applications.
 _Avoid_: Output sink (that is a PipeWire endpoint), output bus
+
+**Output channel type**:
+The role of an output channel: playback, which delivers audio to playback sinks, or capture, which exposes audio as a virtual microphone source applications can select.
+_Avoid_: Classification (without saying what is classified)
 
 **Mix bus**:
 A named mix that collects sends from input channels and can feed one or more matrices.
@@ -53,6 +57,10 @@ _Avoid_: Playback rule
 **Device binding**:
 A destination’s choice to follow the system default device or remain pinned to a specific physical device.
 _Avoid_: Device name (names may change and are not necessarily stable identity)
+
+**Device selector**:
+A command-facing reference to a device, resolved from its user-facing name or stable listed ID; duplicate names require the ID.
+_Avoid_: Device ID as the only way to address a device
 
 **Send**:
 A channel’s routed contribution to an output channel or mix bus, with its own level; direct sends are post-fader.

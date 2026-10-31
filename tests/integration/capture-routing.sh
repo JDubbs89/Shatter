@@ -84,28 +84,28 @@ fi
 "$binary" start
 engine_running=1
 "$binary" make out "Capture Monitor"
-listed_device_id=$($binary list out | awk -F'|' '/shatter-test-speakers/ { id=$2; gsub(/^[[:space:]]+|[[:space:]]+$/, "", id); print id; exit }')
+listed_device_id="Shatter Test Speakers"
 "$binary" assign out "Capture Monitor" "$listed_device_id"
 inputs=$($binary --list-in)
-source_selector=$(printf '%s\n' "$inputs" | awk -F'|' '/shatter-test-mic-source/ { id=$2; gsub(/^[[:space:]]+|[[:space:]]+$/, "", id); print id; exit }')
+source_selector=$(printf '%s\n' "$inputs" | awk -F'|' '/capture \/ source-/ { id=$2; gsub(/^[[:space:]]+|[[:space:]]+$/, "", id); sub(/^capture \/ /, "", id); print id; exit }')
 case "$inputs" in
-    *"Available capture sources"*"$source_selector"*"shatter-test-mic-source"*) ;;
-    *) echo "selected source is missing from input list: $inputs" >&2; exit 1 ;;
+    *"$source_selector"*) ;;
+    *) echo "automatic capture channel is missing from input list: $inputs" >&2; exit 1 ;;
 esac
 
-"$binary" --set-capture-source "$source_selector"
+"$binary" make out "Virtual Mic" capture
 output_listing=$("$binary" --list-out)
 case "$output_listing" in
     *"Available application input captures"*"No application input captures found"*) ;;
     *) echo "Shatter's own capture stream was exposed as an assignable application input: $output_listing" >&2; exit 1 ;;
 esac
-"$binary" set fader capture capture -6
+"$binary" set fader capture "$source_selector" -6
 fader_status=$("$binary" fader status)
 case "$fader_status" in
     *"Capture"*"-6.0 dB"*) ;;
     *) echo "capture fader did not apply a relative decrement: $fader_status" >&2; exit 1 ;;
 esac
-"$binary" inc fader capture capture +6
+"$binary" inc fader capture "$source_selector" +6
 sleep 0.3
 inputs=$($binary --list-in)
 case "$inputs" in
@@ -116,6 +116,7 @@ if ! "$binary" --set-capture-send off >/dev/null; then
     echo "could not keep capture speaker send disabled" >&2
     exit 1
 fi
+"$binary" assign capture "$source_selector" "Virtual Mic"
 
 record_monitor()
 {
@@ -140,7 +141,7 @@ record_monitor()
 }
 
 record_monitor "$test_root/send-off.raw"
-"$binary" assign capture capture speakers
+"$binary" assign capture "$source_selector" speakers
 sleep 0.25
 record_monitor "$test_root/send-on.raw"
 capture_meter=$("$binary" meters capture)
@@ -148,7 +149,33 @@ if ! printf '%s\n' "$capture_meter" | awk -F'|' '$1 ~ /^capture / && $3 + 0 > -6
     echo "selected capture meter did not report the active signal: $capture_meter" >&2
     exit 1
 fi
-"$binary" set mute capture capture on
+virtual_mic_node=$(printf '%s\n' "$output_listing" | awk -F'|' '/Virtual Mic/ { id=$3; gsub(/^[[:space:]]+|[[:space:]]+$/, "", id); print id; exit }')
+pw-record --target 0 --rate 48000 --channels 2 --format f32 --raw --sample-count 48000 "$test_root/virtual-mic.raw" \
+    >"$test_root/virtual-mic-record.log" 2>&1 &
+record_pid=$!
+ready=0
+for attempt in $(seq 1 40); do
+    if pw-link -i | grep -q 'pw-record:input_FL'; then ready=1; break; fi
+    sleep 0.05
+done
+if [ "$ready" -ne 1 ]; then
+    kill "$record_pid" 2>/dev/null || true
+    echo "virtual microphone recorder ports did not appear" >&2
+    exit 1
+fi
+if ! pw-link "$virtual_mic_node:capture_FL" pw-record:input_FL >/dev/null; then
+    echo "could not link virtual microphone node '$virtual_mic_node'; output ports: $(pw-link -o)" >&2
+    exit 1
+fi
+pw-link "$virtual_mic_node:capture_FR" pw-record:input_FR >/dev/null
+wait "$record_pid" || [ -s "$test_root/virtual-mic.raw" ]
+record_pid=
+virtual_mic_meter=$("$binary" meters "Virtual Mic")
+if ! printf '%s\n' "$virtual_mic_meter" | awk -F'|' '$1 ~ /^output / && $3 + 0 > -60 && $4 + 0 > -60 { found=1 } END { exit !found }'; then
+    echo "virtual microphone output meter did not report the actively consumed capture signal: $virtual_mic_meter" >&2
+    exit 1
+fi
+"$binary" set mute capture "$source_selector" on
 inputs=$("$binary" list in)
 case "$inputs" in
     *"capture"*"yes"*) ;;
@@ -156,25 +183,25 @@ case "$inputs" in
 esac
 sleep 0.25
 record_monitor "$test_root/capture-muted.raw"
-"$binary" set mute capture capture off
-"$binary" assign capture capture "Capture Monitor"
+"$binary" set mute capture "$source_selector" off
+"$binary" assign capture "$source_selector" "Capture Monitor"
 "$binary" save show capture-routes
 config_file="$XDG_CONFIG_HOME/shatter/capture-routes.conf"
-grep -F 'M "device-name:shatter-test-mic-source"' "$config_file" >/dev/null || {
-    echo "saved show omitted the selected capture device identity" >&2; cat "$config_file" >&2; exit 1;
+grep -F 'I "device-name:Shatter Integration Test Source"' "$config_file" >/dev/null || {
+    echo "saved show omitted the automatic capture channel identity" >&2; cat "$config_file" >&2; exit 1;
 }
-"$binary" unassign capture capture speakers
-"$binary" unassign capture capture "Capture Monitor"
+"$binary" unassign capture "$source_selector" speakers
+"$binary" unassign capture "$source_selector" "Capture Monitor"
 "$binary" delete out "Capture Monitor"
 "$binary" load show capture-routes
 inputs=$("$binary" list in)
 case "$inputs" in
-    *"capture"*"speakers, Capture..."*) ;;
+    *"$source_selector"*"Capture Monitor"*) ;;
     *) echo "loaded show did not restore capture sends: $inputs" >&2; exit 1 ;;
 esac
 case "$inputs" in
-    *"$source_selector"*"selected"*) ;;
-    *) echo "loaded show did not restore the selected capture device: $inputs" >&2; exit 1 ;;
+    *"$source_selector"*) ;;
+    *) echo "loaded show did not preserve the automatically discovered capture channel: $inputs" >&2; exit 1 ;;
 esac
 outputs=$("$binary" list out)
 case "$outputs" in
@@ -183,19 +210,20 @@ case "$outputs" in
 esac
 sleep 0.25
 record_monitor "$test_root/two-sends.raw"
-"$binary" unassign capture capture speakers
+"$binary" unassign capture "$source_selector" speakers
 sleep 0.25
 record_monitor "$test_root/named-send-only.raw"
-"$binary" unassign capture capture "Capture Monitor"
+"$binary" unassign capture "$source_selector" "Capture Monitor"
 sleep 0.25
 record_monitor "$test_root/all-sends-off.raw"
-"$binary" assign capture capture speakers
+"$binary" assign capture "$source_selector" speakers
 "$binary" --set-capture-gain -20
 sleep 0.25
 record_monitor "$test_root/attenuated.raw"
 
 python3 - "$test_root/send-off.raw" "$test_root/send-on.raw" "$test_root/capture-muted.raw" "$test_root/two-sends.raw" \
-    "$test_root/named-send-only.raw" "$test_root/all-sends-off.raw" "$test_root/attenuated.raw" <<'PY'
+    "$test_root/named-send-only.raw" "$test_root/all-sends-off.raw" "$test_root/attenuated.raw" \
+    "$test_root/virtual-mic.raw" <<'PY'
 import math
 import struct
 import sys
@@ -205,7 +233,7 @@ def rms(path):
     samples = struct.unpack("<%df" % (len(raw) // 4), raw)
     return math.sqrt(sum(sample * sample for sample in samples) / len(samples)) if samples else 0.0
 
-off, on, muted, two_sends, named_only, all_off, attenuated = [rms(path) for path in sys.argv[1:]]
+off, on, muted, two_sends, named_only, all_off, attenuated, virtual_mic = [rms(path) for path in sys.argv[1:]]
 if off > 0.001:
     raise SystemExit("capture speaker send was audible while disabled: rms=%s" % off)
 if on < 0.05:
@@ -221,6 +249,8 @@ if all_off > 0.001:
 if not on * 0.08 < attenuated < on * 0.12:
     raise SystemExit("capture gain did not attenuate the microphone signal by 20 dB: on=%s attenuated=%s" %
                      (on, attenuated))
+if virtual_mic < 0.05:
+    raise SystemExit("virtual microphone consumer received no capture signal: rms=%s" % virtual_mic)
 PY
 
 "$binary" stop

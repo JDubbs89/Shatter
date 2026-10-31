@@ -22,7 +22,7 @@ public:
     virtual bool rename_stream(std::string_view current_name, std::string new_name, std::string& error) = 0;
     virtual bool set_capture_source(std::string_view source_selector, std::string& error) = 0;
     virtual bool set_capture_gain_db(float decibels, std::string& error) = 0;
-    virtual bool set_capture_muted(bool muted, std::string& error) = 0;
+    virtual bool set_capture_muted(std::string_view capture_selector, bool muted, std::string& error) = 0;
     virtual bool set_fader_db(std::string_view scope, std::string_view selector, float decibels,
                               bool minimum, std::string& error) = 0;
     virtual bool adjust_fader_db(std::string_view scope, std::string_view selector, float delta_db,
@@ -32,7 +32,7 @@ public:
                                     std::string& error) = 0;
     virtual bool set_output_muted(std::string_view output_selector, bool muted,
                                   std::string& error) = 0;
-    virtual bool make_output(std::string name, std::string& error) = 0;
+    virtual bool make_output(std::string name, bool capture_source, std::string& error) = 0;
     virtual bool delete_output(std::string_view selector, std::string& error) = 0;
     virtual bool assign_output_destination(std::string_view output_selector,
                                            std::string_view destination_selector,

@@ -31,7 +31,8 @@ void PipeWireEngine::on_stream_input_process(void* data)
 
 void PipeWireEngine::on_capture_source_process(void* data)
 {
-    static_cast<PipeWireEngine*>(data)->capture_source_process();
+    auto& channel = *static_cast<CaptureChannel*>(data);
+    channel.engine->capture_source_process(channel);
 }
 
 
@@ -96,15 +97,15 @@ void PipeWireEngine::stream_input_process(PlaybackStream& stream)
     pw_stream_queue_buffer(stream.sink, buffer);
 }
 
-void PipeWireEngine::capture_source_process()
+void PipeWireEngine::capture_source_process(CaptureChannel& capture_channel)
 {
-    RealtimeAccessGate::Guard process_guard(capture_channel_.process_gate);
+    RealtimeAccessGate::Guard process_guard(capture_channel.process_gate);
     if (!process_guard) return;
     std::array<std::uint32_t, max_output_channels> output_generations{};
     for (std::size_t index = 0; index < output_generations.size(); ++index)
         output_generations[index] = output_channels_[index].input_generation.load(std::memory_order_acquire);
     RuntimeProfiler::Scope profile_scope(profiler_, RuntimeProfiler::Callback::input);
-    pw_buffer* buffer = pw_stream_dequeue_buffer(capture_channel_.source_stream);
+    pw_buffer* buffer = pw_stream_dequeue_buffer(capture_channel.source_stream);
     if (buffer == nullptr) return;
     if (buffer->buffer != nullptr && buffer->buffer->n_datas > 0) {
         spa_data& data = buffer->buffer->datas[0];
@@ -114,13 +115,13 @@ void PipeWireEngine::capture_source_process()
             const auto frames = static_cast<std::size_t>(data.chunk->size) / stride;
             const auto* samples = reinterpret_cast<const float*>(
                 static_cast<const std::uint8_t*>(data.data) + data.chunk->offset);
-            const float target = capture_channel_.muted.load(std::memory_order_relaxed)
-                ? 0.0F : capture_channel_.target_gain.load(std::memory_order_relaxed);
+            const float target = capture_channel.muted.load(std::memory_order_relaxed)
+                ? 0.0F : capture_channel.target_gain.load(std::memory_order_relaxed);
             const float increment = frames == 0 ? 0.0F
-                : (target - capture_channel_.smoothed_gain) / static_cast<float>(frames);
-            capture_channel_.meter.observe_ramped(samples, frames, kChannels,
-                capture_channel_.smoothed_gain, increment);
-            const auto mask = capture_channel_.output_mask.load(std::memory_order_acquire);
+                : (target - capture_channel.smoothed_gain) / static_cast<float>(frames);
+            capture_channel.meter.observe_ramped(samples, frames, kChannels,
+                capture_channel.smoothed_gain, increment);
+            const auto mask = capture_channel.output_mask.load(std::memory_order_acquire);
             std::uint64_t dropped_frames = 0;
             for (std::size_t output_index = 0; output_index < output_channels_.size(); ++output_index) {
                 if ((mask & (1U << output_index)) == 0) continue;
@@ -128,10 +129,10 @@ void PipeWireEngine::capture_source_process()
                 RealtimeAccessGate::Guard output_guard(output.input_gate);
                 if (!output_guard) continue;
                 if (output.input_generation.load(std::memory_order_acquire) == output_generations[output_index] &&
-                    (capture_channel_.output_mask.load(std::memory_order_acquire) & (1U << output_index)) != 0 &&
+                    (capture_channel.output_mask.load(std::memory_order_acquire) & (1U << output_index)) != 0 &&
                     output.linked.load(std::memory_order_acquire)) {
-                    const auto written = capture_channel_.audio[output_index].write_with_gain_ramp(
-                        samples, frames, capture_channel_.smoothed_gain, increment);
+                    const auto written = capture_channel.audio[output_index].write_with_gain_ramp(
+                        samples, frames, capture_channel.smoothed_gain, increment);
                     dropped_frames += frames - written;
                 }
             }
@@ -139,11 +140,11 @@ void PipeWireEngine::capture_source_process()
                 profile_scope.record_input_overrun(dropped_frames);
                 xruns_.record_input_overrun(dropped_frames);
             }
-            capture_channel_.smoothed_gain = target;
+            capture_channel.smoothed_gain = target;
             profile_scope.set_frames(frames, kSampleRate);
         }
     }
-    pw_stream_queue_buffer(capture_channel_.source_stream, buffer);
+    pw_stream_queue_buffer(capture_channel.source_stream, buffer);
 }
 
 void PipeWireEngine::output_process(OutputChannel& output)
@@ -239,17 +240,18 @@ void PipeWireEngine::output_process(OutputChannel& output)
                     }
                 }
 
-                std::fill(channel_mix.begin(), channel_mix.begin() + block_frames * kChannels, 0.0F);
-                RealtimeAccessGate::Guard capture_guard(capture_channel_.mixer_gate);
-                if (capture_guard) {
-                    auto& ring = capture_channel_.audio[output_index];
+                for (auto& capture_channel : capture_channels_) {
+                    if (!capture_channel.in_use) continue;
+                    std::fill(channel_mix.begin(), channel_mix.begin() + block_frames * kChannels, 0.0F);
+                    RealtimeAccessGate::Guard capture_guard(capture_channel.mixer_gate);
+                    if (!capture_guard) continue;
+                    auto& ring = capture_channel.audio[output_index];
                     const auto consumed = ring.read(channel_mix.data(), block_frames);
                     profile_scope.record_ring_occupancy(ring.available_frames());
                     profile_scope.record_unfilled_mix_frames(block_frames - consumed);
-                    if ((capture_channel_.output_mask.load(std::memory_order_acquire) & output_bit) != 0) {
+                    if ((capture_channel.output_mask.load(std::memory_order_acquire) & output_bit) != 0)
                         dsp::accumulate_ramp(samples + output_offset, channel_mix.data(),
                                              block_frames, kChannels, {1.0F, 0.0F});
-                    }
                 }
             }
 

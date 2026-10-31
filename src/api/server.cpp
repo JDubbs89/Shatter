@@ -198,9 +198,12 @@ int run_server()
                 }
             } else if (input.starts_with("OUTPUT-MAKE ")) {
                 std::istringstream parsed{std::string(input)};
-                std::string action, name, extra, output_error;
-                if (!(parsed >> action >> std::quoted(name)) || (parsed >> extra)) reply = "ERR expected OUTPUT-MAKE <name>\n";
-                else if (audio_engine.make_output(name, output_error)) reply = "OK output channel created: " + name + "\n";
+                std::string action, name, type = "playback", extra, output_error;
+                if (!(parsed >> action >> std::quoted(name)) ||
+                    ((parsed >> type) && type != "playback" && type != "capture") || (parsed >> extra))
+                    reply = "ERR expected OUTPUT-MAKE <name> [playback|capture]\n";
+                else if (audio_engine.make_output(name, type == "capture", output_error))
+                    reply = "OK " + type + " output channel created: " + name + "\n";
                 else reply = "ERR " + output_error + "\n";
             } else if (input.starts_with("OUTPUT-DELETE ")) {
                 std::istringstream parsed{std::string(input)};
@@ -329,10 +332,8 @@ int run_server()
                 } else if (scope == "CAPTURE") {
                     std::string mute_error;
                     muted = value == "on";
-                    if (identifier != "capture") {
-                        reply = "ERR capture input selector must be 'capture'\n";
-                    } else if (audio_engine.set_capture_muted(muted, mute_error)) {
-                        reply = std::string("OK capture channel ") + (muted ? "muted\n" : "unmuted\n");
+                    if (audio_engine.set_capture_muted(identifier, muted, mute_error)) {
+                        reply = "OK capture channel " + identifier + (muted ? " muted\n" : " unmuted\n");
                     } else {
                         reply = "ERR " + mute_error + "\n";
                     }

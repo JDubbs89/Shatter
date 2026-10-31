@@ -125,21 +125,29 @@ void PipeWireEngine::on_global(void* data, std::uint32_t id, std::uint32_t,
         return;
     }
 
-    std::lock_guard lock(engine.nodes_mutex_);
-    engine.nodes_[id] = std::move(node);
-    const auto added = engine.nodes_.find(id);
-    if (added != engine.nodes_.end() && engine.is_output_destination(added->second)) {
-        for (auto& output : engine.output_channels_)
-            if (output.in_use) engine.restore_output_routes_locked(output);
+    const bool is_capture_source = node.media_class == "Audio/Source" && node.application != "Shatter";
+    NodeInfo capture_source = node;
+    {
+        std::lock_guard lock(engine.nodes_mutex_);
+        engine.nodes_[id] = std::move(node);
+        const auto added = engine.nodes_.find(id);
+        if (added != engine.nodes_.end() && engine.is_output_destination(added->second)) {
+            for (auto& output : engine.output_channels_)
+                if (output.in_use) engine.restore_output_routes_locked(output);
+        }
+        engine.refresh_output_link_locked();
     }
-    engine.refresh_output_link_locked();
+    if (is_capture_source) {
+        std::string error;
+        engine.add_capture_channel(capture_source, error);
+    }
 }
 
 void PipeWireEngine::on_global_remove(void* data, std::uint32_t id)
 {
     auto& engine = *static_cast<PipeWireEngine*>(data);
     PlaybackStream* removed = nullptr;
-    bool removed_capture_source = false;
+    CaptureChannel* removed_capture_source = nullptr;
     {
         std::lock_guard lock(engine.nodes_mutex_);
         const auto removed_node = engine.nodes_.find(id);
@@ -150,7 +158,11 @@ void PipeWireEngine::on_global_remove(void* data, std::uint32_t id)
                     if (output.assigned_sink_node_ids[i] == id) output.assigned_sink_node_ids[i] = PW_ID_ANY;
             }
         }
-        removed_capture_source = engine.capture_channel_.source_node_id == id;
+        for (auto& channel : engine.capture_channels_) {
+            if (!channel.in_use || channel.source_node_id != id) continue;
+            channel.source_node_id = PW_ID_ANY;
+            removed_capture_source = &channel;
+        }
         const auto stream = engine.stream_by_node_.find(id);
         if (stream != engine.stream_by_node_.end()) {
             removed = &engine.playback_streams_[stream->second];
@@ -179,10 +191,7 @@ void PipeWireEngine::on_global_remove(void* data, std::uint32_t id)
         }
         engine.refresh_output_link_locked();
     }
-    if (removed_capture_source) {
-        engine.destroy_capture_stream();
-        engine.capture_channel_.output_mask.store(0, std::memory_order_release);
-    }
+    if (removed_capture_source != nullptr) engine.destroy_capture_channel(*removed_capture_source, false);
     if (removed != nullptr) {
         if (removed->sink != nullptr) {
             pw_stream_disconnect(removed->sink);

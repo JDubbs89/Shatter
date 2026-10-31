@@ -91,7 +91,7 @@ TEST_CASE("shows save backend-neutral device and capture identities", "[state-st
 
     std::ifstream file(directory.path() / "portable.conf");
     const std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-    CHECK(content.starts_with("SHATTER-CONFIG 4\n"));
+    CHECK(content.starts_with("SHATTER-CONFIG 6\n"));
     CHECK(content.find("D \"shatter.output.1\" \"device:serial:headphones-2\" \"Studio Headphones\"") != std::string::npos);
     CHECK(content.find("M \"device:serial:mic-7\"") != std::string::npos);
 }

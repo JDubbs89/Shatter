@@ -1,12 +1,24 @@
 #pragma once
 
 #include <cstdint>
+#include <cctype>
 #include <iomanip>
 #include <sstream>
 #include <string>
 #include <string_view>
 
 namespace shatter::engine {
+
+inline bool selector_name_matches(std::string_view left, std::string_view right)
+{
+    if (left.size() != right.size()) return false;
+    for (std::size_t index = 0; index < left.size(); ++index) {
+        const auto left_character = static_cast<unsigned char>(left[index]);
+        const auto right_character = static_cast<unsigned char>(right[index]);
+        if (std::tolower(left_character) != std::tolower(right_character)) return false;
+    }
+    return true;
+}
 
 inline std::string make_stable_selector_id(std::string_view prefix, std::string_view identity)
 {
