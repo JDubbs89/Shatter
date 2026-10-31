@@ -1,4 +1,5 @@
 #include "shatter/engine/pipewire_engine.hpp"
+#include "shatter/engine/dsp.hpp"
 
 #include <pipewire/stream.h>
 
@@ -216,12 +217,8 @@ void PipeWireEngine::output_process(OutputChannel& output)
                     const float increment = block_frames == 0 ? 0.0F
                         : (target - gain) / static_cast<float>(block_frames);
                     if (assigned) {
-                        float app_gain = gain;
-                        for (std::size_t frame = 0; frame < block_frames; ++frame) {
-                            samples[output_offset + frame * kChannels] += channel_mix[frame * kChannels] * app_gain;
-                            samples[output_offset + frame * kChannels + 1] += channel_mix[frame * kChannels + 1] * app_gain;
-                            app_gain += increment;
-                        }
+                        dsp::accumulate_ramp(samples + output_offset, channel_mix.data(),
+                                             block_frames, kChannels, {gain, increment});
                     }
                     channel.smoothed_gain[output_index] = target;
 
@@ -245,17 +242,12 @@ void PipeWireEngine::output_process(OutputChannel& output)
                         profile_scope.record_unfilled_mix_frames(block_frames - consumed);
                         const float stream_target = stream.muted.load(std::memory_order_relaxed)
                             ? 0.0F : stream.target_gain.load(std::memory_order_relaxed);
-                        float stream_gain = stream.smoothed_send_gain[output_index];
+                        const float stream_gain = stream.smoothed_send_gain[output_index];
                         const float stream_increment = block_frames == 0 ? 0.0F
                             : (stream_target - stream_gain) / static_cast<float>(block_frames);
-                        float app_gain = gain;
-                        for (std::size_t frame = 0; frame < block_frames; ++frame) {
-                            const float combined_gain = app_gain * stream_gain;
-                            samples[output_offset + frame * kChannels] += channel_mix[frame * kChannels] * combined_gain;
-                            samples[output_offset + frame * kChannels + 1] += channel_mix[frame * kChannels + 1] * combined_gain;
-                            app_gain += increment;
-                            stream_gain += stream_increment;
-                        }
+                        dsp::accumulate_with_gain_ramps(samples + output_offset, channel_mix.data(),
+                            block_frames, kChannels, {gain, increment},
+                            {stream_gain, stream_increment});
                         stream.smoothed_send_gain[output_index] = stream_target;
                         stream.mixer_users.fetch_sub(1, std::memory_order_release);
                     }
@@ -277,8 +269,8 @@ void PipeWireEngine::output_process(OutputChannel& output)
                     profile_scope.record_ring_occupancy(ring.available_frames());
                     profile_scope.record_unfilled_mix_frames(block_frames - consumed);
                     if ((capture_channel_.output_mask.load(std::memory_order_acquire) & output_bit) != 0) {
-                        for (std::size_t sample = 0; sample < block_frames * kChannels; ++sample)
-                            samples[output_offset + sample] += channel_mix[sample];
+                        dsp::accumulate_ramp(samples + output_offset, channel_mix.data(),
+                                             block_frames, kChannels, {1.0F, 0.0F});
                     }
                     capture_channel_.mixer_users.fetch_sub(1, std::memory_order_release);
                 }
@@ -286,30 +278,17 @@ void PipeWireEngine::output_process(OutputChannel& output)
 
             const float output_target = output.muted.load(std::memory_order_relaxed)
                 ? 0.0F : output.target_gain.load(std::memory_order_relaxed);
-            float output_gain = output.smoothed_gain;
+            const float output_gain = output.smoothed_gain;
             const float output_increment = frames == 0 ? 0.0F
                 : (output_target - output_gain) / static_cast<float>(frames);
-            for (std::size_t frame = 0; frame < frames; ++frame) {
-                samples[frame * kChannels] *= output_gain;
-                samples[frame * kChannels + 1] *= output_gain;
-                output_gain += output_increment;
-            }
+            dsp::scale_ramp(samples, frames, kChannels, {output_gain, output_increment});
             output.smoothed_gain = output_target;
 
             if (shutdown_fade_requested_.load(std::memory_order_acquire)) {
                 if (output.shutdown_fade_frames_remaining == 0 && output.shutdown_fade_gain > 0.0F)
                     output.shutdown_fade_frames_remaining = kShutdownFadeFrames;
-                const float fade_step = 1.0F / static_cast<float>(kShutdownFadeFrames);
-                for (std::size_t frame = 0; frame < frames; ++frame) {
-                    const float gain = output.shutdown_fade_frames_remaining == 0
-                        ? 0.0F : output.shutdown_fade_gain;
-                    samples[frame * kChannels] *= gain;
-                    samples[frame * kChannels + 1] *= gain;
-                    if (output.shutdown_fade_frames_remaining > 0) {
-                        output.shutdown_fade_gain = std::max(0.0F, output.shutdown_fade_gain - fade_step);
-                        --output.shutdown_fade_frames_remaining;
-                    }
-                }
+                dsp::apply_fade(samples, frames, kChannels, output.shutdown_fade_gain,
+                                output.shutdown_fade_frames_remaining, kShutdownFadeFrames);
             }
             data.chunk->offset = 0;
             data.chunk->stride = sizeof(float) * kChannels;
