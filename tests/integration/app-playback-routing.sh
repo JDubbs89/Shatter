@@ -130,6 +130,26 @@ if [ -z "$app_a_id" ]; then
     exit 1
 fi
 
+"$binary" set fader app "$app_a_id" +20
+fader_status=$("$binary" fader status)
+case "$fader_status" in
+    *"Channel name"*"Fader position"*"TestAppA (app)"*"+12.0 dB"*) ;;
+    *) echo "fader increment did not clamp at +12 dB or status table is incomplete: $fader_status" >&2; exit 1 ;;
+esac
+"$binary" set fader app "$app_a_id" -20
+fader_status=$("$binary" fader status)
+case "$fader_status" in
+    *"TestAppA (app)"*"-8.0 dB"*) ;;
+    *) echo "fader decrement was not relative to the current level: $fader_status" >&2; exit 1 ;;
+esac
+"$binary" set fader app "$app_a_id" -inf
+fader_status=$("$binary" fader status)
+case "$fader_status" in
+    *"TestAppA (app)"*"-inf"*) ;;
+    *) echo "-inf did not put the app fader at its minimum: $fader_status" >&2; exit 1 ;;
+esac
+"$binary" set fader app "$app_a_id" +60
+
 if "$binary" --profile-stop >/dev/null 2>&1; then
     echo "expected profile stop without a running profile to fail" >&2
     exit 1
@@ -212,6 +232,15 @@ if [ -z "$stream_a_id" ]; then
     echo "app playback stream ID was not listed" >&2
     exit 1
 fi
+"$binary" set fader stream "$stream_a_id" +20
+"$binary" set fader stream "$stream_a_id" -20
+fader_status=$("$binary" fader status)
+case "$fader_status" in
+    *"(stream)"*"-8.0 dB"*) ;;
+    *) echo "playback-stream fader did not apply relative increments: $fader_status" >&2; exit 1 ;;
+esac
+"$binary" set fader stream "$stream_a_id" -inf
+"$binary" set fader stream "$stream_a_id" +60
 "$binary" --set-gain stream "$stream_a_id" -20
 "$binary" --set-mute stream "$stream_a_id" on
 "$binary" --set-mute stream "$stream_a_id" off
@@ -232,6 +261,20 @@ if "$binary" make out shatter.speakers >/dev/null 2>&1; then
     exit 1
 fi
 "$binary" make out "Headphone Monitor"
+"$binary" set fader output "Headphone Monitor" +20
+fader_status=$("$binary" fader status)
+case "$fader_status" in
+    *"Headphone Monitor (output)"*"+12.0 dB"*) ;;
+    *) echo "output fader was missing or did not clamp at +12 dB: $fader_status" >&2; exit 1 ;;
+esac
+"$binary" set fader output "Headphone Monitor" -20
+fader_status=$("$binary" fader status)
+case "$fader_status" in
+    *"Headphone Monitor (output)"*"-8.0 dB"*) ;;
+    *) echo "output fader did not apply relative increments: $fader_status" >&2; exit 1 ;;
+esac
+"$binary" set fader output "Headphone Monitor" -inf
+"$binary" set fader output "Headphone Monitor" +60
 "$binary" assign out "Headphone Monitor" "sink-$headphones_sink_id"
 "$binary" assign app "$app_a_id" "Headphone Monitor"
 "$binary" --set-gain stream "$stream_a_id" 0

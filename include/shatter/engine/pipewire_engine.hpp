@@ -45,6 +45,8 @@ public:
     bool set_capture_source(std::uint32_t source_node_id, std::string& error);
     bool set_capture_gain_db(float decibels, std::string& error);
     bool set_capture_muted(bool muted, std::string& error);
+    bool adjust_fader_db(std::string_view scope, std::string_view selector, float delta_db,
+                         bool minimum, std::string& error);
     bool set_capture_speaker_send(bool enabled, std::string& error);
     bool set_output_gain_db(std::string_view output_selector, float decibels, std::string& error);
     bool set_output_muted(std::string_view output_selector, bool muted, std::string& error);
@@ -61,6 +63,7 @@ public:
     bool load_default_config(std::string& name, std::string& error);
     std::string list_inputs(std::size_t terminal_width = 100) const;
     std::string list_outputs(std::size_t terminal_width = 100) const;
+    std::string fader_status() const;
     bool profile_start(std::string& error);
     std::string profile_stop(std::string& error);
     bool available() const noexcept;

@@ -92,6 +92,13 @@ case "$inputs" in
 esac
 
 "$binary" --set-capture-source "$source_id"
+"$binary" set fader capture capture -6
+fader_status=$("$binary" fader status)
+case "$fader_status" in
+    *"Capture"*"-6.0 dB"*) ;;
+    *) echo "capture fader did not apply a relative decrement: $fader_status" >&2; exit 1 ;;
+esac
+"$binary" set fader capture capture +6
 sleep 0.3
 inputs=$($binary --list-in)
 case "$inputs" in

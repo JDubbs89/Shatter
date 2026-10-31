@@ -28,6 +28,7 @@ constexpr std::uint32_t kSampleRate = 48000;
 constexpr std::uint32_t kChannels = 2;
 constexpr float kMinimumGainDb = -60.0F;
 constexpr float kMaximumGainDb = 12.0F;
+constexpr std::size_t kFaderTrackWidth = 25;
 constexpr std::uint32_t kMixerClosed = 1U << 31U;
 constexpr std::uint32_t kMixerUserMask = kMixerClosed - 1U;
 
@@ -103,6 +104,22 @@ std::string format_gain(float linear)
     std::ostringstream value;
     value << std::fixed << std::setprecision(1) << gain_db(linear) << " dB";
     return value.str();
+}
+
+std::string format_fader_position(float linear)
+{
+    const float decibels = gain_db(linear);
+    const float normalized = std::clamp((decibels - kMinimumGainDb) /
+        (kMaximumGainDb - kMinimumGainDb), 0.0F, 1.0F);
+    const auto marker = static_cast<std::size_t>(std::lround(normalized * (kFaderTrackWidth - 1)));
+    std::string track(kFaderTrackWidth, '-');
+    track[marker] = 'O';
+
+    std::ostringstream position;
+    position << "-inf |" << track << "| +12.0 dB  ";
+    if (linear <= 0.0F || decibels <= kMinimumGainDb) position << "-inf";
+    else position << format_gain(linear);
+    return position.str();
 }
 
 std::string make_channel_id(std::string_view identity)
@@ -323,6 +340,60 @@ bool PipeWireEngine::set_capture_muted(bool muted, std::string&)
 {
     capture_channel_.muted.store(muted, std::memory_order_release);
     return true;
+}
+
+bool PipeWireEngine::adjust_fader_db(std::string_view scope, std::string_view selector, float delta_db,
+                                     bool minimum, std::string& error)
+{
+    if (!minimum && !std::isfinite(delta_db)) {
+        error = "fader increment must be a finite number of dB or -inf";
+        return false;
+    }
+    const auto adjusted = [delta_db, minimum](float current_gain) {
+        if (minimum) return 0.0F;
+        const float target_db = std::clamp(gain_db(current_gain) + delta_db,
+                                           kMinimumGainDb, kMaximumGainDb);
+        return std::pow(10.0F, target_db / 20.0F);
+    };
+
+    if (scope == "app") {
+        std::lock_guard lock(nodes_mutex_);
+        AppChannel* channel = resolve_channel_locked(selector, error);
+        if (channel == nullptr) return false;
+        channel->target_gain.store(adjusted(channel->target_gain.load(std::memory_order_relaxed)),
+                                   std::memory_order_release);
+        return true;
+    }
+    if (scope == "stream") {
+        std::lock_guard lock(nodes_mutex_);
+        PlaybackStream* stream = resolve_stream_locked(selector, error);
+        if (stream == nullptr || !stream->active.load(std::memory_order_relaxed)) {
+            if (error.empty()) error = "unknown or inactive playback stream: " + std::string(selector);
+            return false;
+        }
+        stream->target_gain.store(adjusted(stream->target_gain.load(std::memory_order_relaxed)),
+                                  std::memory_order_release);
+        return true;
+    }
+    if (scope == "capture") {
+        if (selector != "capture") {
+            error = "capture input selector must be 'capture'";
+            return false;
+        }
+        capture_channel_.target_gain.store(adjusted(capture_channel_.target_gain.load(std::memory_order_relaxed)),
+                                           std::memory_order_release);
+        return true;
+    }
+    if (scope == "output") {
+        std::lock_guard lock(nodes_mutex_);
+        OutputChannel* output = resolve_output_locked(selector, error);
+        if (output == nullptr) return false;
+        output->target_gain.store(adjusted(output->target_gain.load(std::memory_order_relaxed)),
+                                  std::memory_order_release);
+        return true;
+    }
+    error = "fader scope must be app, stream, capture, or output";
+    return false;
 }
 
 bool PipeWireEngine::set_output_gain_db(std::string_view output_selector, float decibels, std::string& error)
@@ -580,6 +651,31 @@ std::string PipeWireEngine::list_outputs(std::size_t) const
     }
     table << "\nAvailable playback sinks\n";
     append_table(table, {"Shatter sink ID", "PipeWire node ID", "Name"}, sink_rows, {20, 18, 48});
+    return table.str();
+}
+
+std::string PipeWireEngine::fader_status() const
+{
+    std::lock_guard lock(nodes_mutex_);
+    std::vector<TableRow> rows;
+    for (std::size_t i = 0; i < allocated_channels_.load(std::memory_order_relaxed); ++i) {
+        const auto& channel = app_channels_[i];
+        rows.push_back({channel.name + " (app)", format_fader_position(channel.target_gain.load())});
+    }
+    for (std::size_t i = 0; i < allocated_streams_.load(std::memory_order_relaxed); ++i) {
+        const auto& stream = playback_streams_[i];
+        if (!stream.in_use || !stream.active.load(std::memory_order_relaxed)) continue;
+        rows.push_back({stream.name + " (stream)", format_fader_position(stream.target_gain.load())});
+    }
+    rows.push_back({"Capture", format_fader_position(capture_channel_.target_gain.load())});
+    for (const auto& output : output_channels_) {
+        if (!output.in_use) continue;
+        rows.push_back({output.name + " (output)", format_fader_position(output.target_gain.load())});
+    }
+
+    std::ostringstream table;
+    table << "Fader status (range: -inf to +12 dB)\n";
+    append_table(table, {"Channel name", "Fader position"}, rows, {32, 70});
     return table.str();
 }
 

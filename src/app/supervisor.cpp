@@ -6,6 +6,7 @@
 #include <cerrno>
 #include <charconv>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
@@ -34,6 +35,8 @@ constexpr std::string_view kUsage =
     "       shatter status [engine]\n"
     "       shatter stop [engine|profile]\n"
     "       shatter list <in|out|all>\n"
+    "       shatter set fader <app|stream|capture|output> <name-or-id> <delta-dB|-inf>\n"
+    "       shatter fader status\n"
     "       shatter set gain <app|stream|output> <name-or-id> <decibels>\n"
     "       shatter set gain capture <decibels>\n"
     "       shatter set default show <name>\n"
@@ -163,6 +166,13 @@ int run_cli(int argc, char** argv)
         if (listing == "in") normalized.emplace_back("--list-in");
         else if (listing == "out") normalized.emplace_back("--list-out");
         else if (listing == "all") normalized.emplace_back("--list-all");
+    } else if (arg(1) == "fader" && arg(2) == "status" && argc == 3) {
+        normalized.emplace_back("--fader-status");
+    } else if (arg(1) == "set" && arg(2) == "fader" && argc == 6) {
+        normalized.emplace_back("--set-fader");
+        normalized.emplace_back(argv[3]);
+        normalized.emplace_back(argv[4]);
+        normalized.emplace_back(argv[5]);
     } else if ((arg(1) == "start" || arg(1) == "stop") && argc == 3 && arg(2) == "profile") {
         normalized.emplace_back(arg(1) == "start" ? "--profile-start" : "--profile-stop");
     } else if ((arg(1) == "start" || arg(1) == "stop" || arg(1) == "status") &&
@@ -285,7 +295,9 @@ int run_cli(int argc, char** argv)
             const std::string_view command(argv[1]);
             std::string_view request_command;
             std::string dynamic_command;
-            if (command == "--list-in" || command == "--list-out" || command == "--list-all") {
+            if (command == "--fader-status") {
+                request_command = "FADER-STATUS";
+            } else if (command == "--list-in" || command == "--list-out" || command == "--list-all") {
                 struct winsize size{};
                 const unsigned short width = ioctl(STDOUT_FILENO, TIOCGWINSZ, &size) == 0 && size.ws_col > 0
                     ? size.ws_col : 100;
@@ -343,6 +355,41 @@ int run_cli(int argc, char** argv)
                             << std::quoted(argv[3]) << ' ' << std::to_string(decibels);
             const std::string command = command_builder.str();
             const std::string response = shatter::api::request(command);
+            if (response.empty()) {
+                std::cerr << "Shatter engine is unavailable; run `shatter start` first.\n";
+                return 1;
+            }
+            if (response.starts_with("ERR ")) {
+                std::cerr << response;
+                return 1;
+            }
+            std::cout << response;
+            return 0;
+        }
+
+        if (argc == 5 && std::string_view(argv[1]) == "--set-fader") {
+            const std::string_view scope(argv[2]);
+            const std::string_view amount(argv[4]);
+            if (scope != "app" && scope != "stream" && scope != "capture" && scope != "output") {
+                std::cerr << "Fader scope must be app, stream, capture, or output.\n";
+                return 2;
+            }
+            std::string delta = "-inf";
+            if (amount != "-inf") {
+                std::string_view numeric = amount;
+                if (numeric.starts_with('+')) numeric.remove_prefix(1);
+                float decibels = 0.0F;
+                const auto [end, error] = std::from_chars(numeric.data(), numeric.data() + numeric.size(), decibels);
+                if (numeric.empty() || error != std::errc{} || end != numeric.data() + numeric.size() ||
+                    !std::isfinite(decibels)) {
+                    std::cerr << "Fader increment must be a finite number of dB or -inf.\n";
+                    return 2;
+                }
+                delta = std::to_string(decibels);
+            }
+            std::ostringstream command_builder;
+            command_builder << "FADER " << scope << ' ' << std::quoted(argv[3]) << ' ' << delta;
+            const std::string response = shatter::api::request(command_builder.str());
             if (response.empty()) {
                 std::cerr << "Shatter engine is unavailable; run `shatter start` first.\n";
                 return 1;

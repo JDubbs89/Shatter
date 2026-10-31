@@ -5,6 +5,7 @@
 #include <cerrno>
 #include <charconv>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
@@ -246,6 +247,27 @@ int run_server()
                 reply = audio_engine.list_outputs();
             } else if (input == "LIST-ALL") {
                 reply = audio_engine.list_inputs() + "\n" + audio_engine.list_outputs();
+            } else if (input == "FADER-STATUS") {
+                reply = audio_engine.fader_status();
+            } else if (input.starts_with("FADER ")) {
+                std::istringstream parsed{std::string(input)};
+                std::string action, scope, selector, amount, extra;
+                if (!(parsed >> action >> scope >> std::quoted(selector) >> amount) || (parsed >> extra)) {
+                    reply = "ERR expected FADER <scope> <channel> <delta-dB|-inf>\n";
+                } else {
+                    const bool minimum = amount == "-inf";
+                    float delta_db = 0.0F;
+                    const auto [end, parse_error] = std::from_chars(amount.data(), amount.data() + amount.size(), delta_db);
+                    std::string fader_error;
+                    if (!minimum && (parse_error != std::errc{} || end != amount.data() + amount.size() ||
+                                     !std::isfinite(delta_db))) {
+                        reply = "ERR fader increment must be a finite number of dB or -inf\n";
+                    } else if (!audio_engine.adjust_fader_db(scope, selector, delta_db, minimum, fader_error)) {
+                        reply = "ERR " + fader_error + "\n";
+                    } else {
+                        reply = "OK " + scope + " fader adjusted\n";
+                    }
+                }
             } else if (input == "PROFILE-START") {
                 std::string profile_error;
                 if (audio_engine.profile_start(profile_error)) {
