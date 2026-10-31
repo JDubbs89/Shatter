@@ -145,6 +145,12 @@ if [ -z "$app_a_id" ]; then
     echo "app channel ID was not listed" >&2
     exit 1
 fi
+stream_a_id=$(printf '%s\n' "$inputs" | awk -F'|' '$3 ~ /TestAppA/ && $2 ~ /stream/ { if (match($6, /stream-[0-9]+/)) { print substr($6, RSTART, RLENGTH); exit } }')
+selected_meter=$("$binary" meters "$stream_a_id")
+case "$selected_meter" in
+    *"stream | $stream_a_id "*) ;;
+    *) echo "selected meter query did not return the requested stream: $selected_meter" >&2; exit 1 ;;
+esac
 
 "$binary" inc fader app "$app_a_id" +20
 fader_status=$("$binary" fader status)
@@ -350,6 +356,16 @@ fi
 record_monitor "$test_root/named-output.raw" 96000 shatter-test-headphones
 assert_audio_rms_at_least "$test_root/named-output.raw" 0.005 \
     "assigned app channel produced no audio at the named output sink"
+meters=$("$binary" meters)
+if ! printf '%s\n' "$meters" | awk -F'|' '{ scope=$1; gsub(/^[[:space:]]+|[[:space:]]+$/, "", scope) } scope ~ /^(app|stream|output)$/ && $3 + 0 > -60 && $4 + 0 > -60 { found[scope]=1 } END { exit !(found["app"] && found["stream"] && found["output"]) }'; then
+    echo "live meters did not report active app, stream, and output audio: $meters" >&2
+    exit 1
+fi
+selected_meter=$("$binary" meters "$stream_a_id")
+if ! printf '%s\n' "$selected_meter" | awk -F'|' '$1 ~ /^stream / && $3 + 0 > -60 && $4 + 0 > -60 { found=1 } END { exit !found }'; then
+    echo "selected stream meter did not report the active signal: $selected_meter" >&2
+    exit 1
+fi
 "$binary" set gain output "Headphone Monitor" -20
 output_listing=$("$binary" list out)
 case "$output_listing" in

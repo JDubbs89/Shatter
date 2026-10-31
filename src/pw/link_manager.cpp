@@ -264,6 +264,10 @@ bool PipeWireEngine::make_output_at_locked(std::string name, std::size_t slot, s
         output.muted.store(false, std::memory_order_relaxed);
         output.smoothed_gain = 1.0F;
         output.assigned_sink_count = 0;
+        output.meter.reset();
+        const auto app_count = allocated_channels_.load(std::memory_order_relaxed);
+        for (std::size_t app_index = 0; app_index < app_count; ++app_index)
+            app_channels_[app_index].meters[index].reset();
         for (auto& assigned_name : output.assigned_sink_names) assigned_name.clear();
         for (auto& identity : output.assigned_sink_identities) identity.clear();
         output.name = std::move(name);

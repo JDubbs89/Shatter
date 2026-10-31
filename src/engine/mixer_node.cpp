@@ -59,6 +59,7 @@ void PipeWireEngine::stream_input_process(PlaybackStream& stream)
                 ? 0.0F : stream.target_gain.load(std::memory_order_relaxed);
             const float increment = frames == 0 ? 0.0F
                 : (target - stream.smoothed_gain) / static_cast<float>(frames);
+            stream.meter.observe_ramped(samples, frames, kChannels, stream.smoothed_gain, increment);
             std::size_t written = frames;
             const auto app_mask = app_channels_[stream.channel_index].output_mask.load(std::memory_order_acquire);
             const auto stream_mask = stream.output_mask.load(std::memory_order_acquire);
@@ -113,6 +114,8 @@ void PipeWireEngine::capture_source_process()
                 ? 0.0F : capture_channel_.target_gain.load(std::memory_order_relaxed);
             const float increment = frames == 0 ? 0.0F
                 : (target - capture_channel_.smoothed_gain) / static_cast<float>(frames);
+            capture_channel_.meter.observe_ramped(samples, frames, kChannels,
+                capture_channel_.smoothed_gain, increment);
             const auto mask = capture_channel_.output_mask.load(std::memory_order_acquire);
             for (std::size_t output_index = 0; output_index < output_channels_.size(); ++output_index) {
                 if ((mask & (1U << output_index)) == 0) continue;
@@ -190,6 +193,8 @@ void PipeWireEngine::output_process(OutputChannel& output)
                     const float increment = block_frames == 0 ? 0.0F
                         : (target - gain) / static_cast<float>(block_frames);
                     if (assigned) {
+                        channel.meters[output_index].observe_ramped(channel_mix.data(), block_frames,
+                            kChannels, gain, increment);
                         dsp::accumulate_ramp(samples + output_offset, channel_mix.data(),
                                              block_frames, kChannels, {gain, increment});
                     }
@@ -245,6 +250,7 @@ void PipeWireEngine::output_process(OutputChannel& output)
                 dsp::apply_fade(samples, frames, kChannels, output.shutdown_fade_gain,
                                 output.shutdown_fade_frames_remaining, kShutdownFadeFrames);
             }
+            output.meter.observe(samples, frames * kChannels);
             data.chunk->offset = 0;
             data.chunk->stride = sizeof(float) * kChannels;
             data.chunk->size = frames * sizeof(float) * kChannels;

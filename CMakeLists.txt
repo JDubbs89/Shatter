@@ -182,6 +182,12 @@ if(BUILD_TESTING)
     target_link_libraries(dsp_test PRIVATE Catch2::Catch2WithMain)
     add_test(NAME dsp COMMAND dsp_test)
 
+    add_executable(meter_test src/meter/meter_bus.cpp tests/unit/meter.cpp)
+    target_include_directories(meter_test PRIVATE include)
+    target_compile_features(meter_test PRIVATE cxx_std_20)
+    target_link_libraries(meter_test PRIVATE Catch2::Catch2WithMain)
+    add_test(NAME meter COMMAND meter_test)
+
     add_executable(state_store_test src/state/store.cpp tests/unit/state-store.cpp)
     target_include_directories(state_store_test PRIVATE include)
     target_compile_features(state_store_test PRIVATE cxx_std_20)

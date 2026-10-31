@@ -67,6 +67,7 @@ void PipeWireEngine::handle_playback_node(std::uint32_t node_id, NodeInfo node)
         }
         stream = &playback_streams_[stream_index];
         stream->engine = this;
+        stream->meter.reset();
         stream->in_use = true;
         stream->target_gain.store(1.0F, std::memory_order_relaxed);
         stream->muted.store(false, std::memory_order_relaxed);

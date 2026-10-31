@@ -25,6 +25,7 @@ constexpr std::string_view kUsage =
     "       shatter status [engine]\n"
     "       shatter stop [engine|profile]\n"
     "       shatter list <in|out|all>\n"
+    "       shatter meters [channel-selector]\n"
     "       shatter set fader <app|stream|capture|output> <name-or-id> <dB|-inf>\n"
     "       shatter inc fader <app|stream|capture|output> <name-or-id> <delta-dB>\n"
     "       shatter fader status\n"
@@ -138,6 +139,9 @@ int run_cli(int argc, char** argv)
         if (listing == "in") normalized.emplace_back("--list-in");
         else if (listing == "out") normalized.emplace_back("--list-out");
         else if (listing == "all") normalized.emplace_back("--list-all");
+    } else if (arg(1) == "meters" && (argc == 2 || argc == 3)) {
+        normalized.emplace_back("--meters");
+        if (argc == 3) normalized.emplace_back(argv[2]);
     } else if (arg(1) == "fader" && arg(2) == "status" && argc == 3) {
         normalized.emplace_back("--fader-status");
     } else if (arg(1) == "set" && arg(2) == "fader" && argc == 6) {
@@ -280,6 +284,8 @@ int run_cli(int argc, char** argv)
                     : command == "--list-out" ? "LIST-OUT " : "LIST-ALL ";
                 dynamic_command = std::string(list_command) + std::to_string(width);
                 request_command = dynamic_command;
+            } else if (command == "--meters") {
+                request_command = "METERS";
             } else if (command == "--profile-start") {
                 request_command = "PROFILE-START";
             } else if (command == "--profile-stop") {
@@ -298,6 +304,16 @@ int run_cli(int argc, char** argv)
                 std::cout << response;
                 return 0;
             }
+        }
+
+        if (argc == 3 && std::string_view(argv[1]) == "--meters") {
+            std::ostringstream command;
+            command << "METERS " << std::quoted(argv[2]);
+            const std::string response = shatter::api::request(command.str());
+            if (response.empty()) { std::cerr << "Shatter engine is unavailable; run `shatter start` first.\n"; return 1; }
+            if (response.starts_with("ERR ")) { std::cerr << response; return 1; }
+            std::cout << response;
+            return 0;
         }
 
         if (argc == 3 && (std::string_view(argv[1]) == "--config-save" ||

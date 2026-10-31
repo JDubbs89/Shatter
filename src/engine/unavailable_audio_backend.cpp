@@ -39,6 +39,7 @@ public:
     }
     std::string list_inputs(std::size_t) const override { return unavailable_message() + "\n"; }
     std::string list_outputs(std::size_t) const override { return unavailable_message() + "\n"; }
+    std::string list_meters(std::string_view) const override { return unavailable_message() + "\n"; }
     std::string fader_status() const override { return unavailable_message() + "\n"; }
     bool profile_start(std::string& error) override { error = unavailable_message(); return false; }
     std::string profile_stop(std::string& error) override { error = unavailable_message(); return {}; }

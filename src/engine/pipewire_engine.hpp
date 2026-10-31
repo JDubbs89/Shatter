@@ -4,6 +4,7 @@
 #include "shatter/engine/audio_ring.hpp"
 #include "shatter/engine/realtime_access_gate.hpp"
 #include "shatter/engine/runtime_profiler.hpp"
+#include "shatter/meter/meter_bus.hpp"
 #include "shatter/state/store.hpp"
 
 #include <pipewire/extensions/metadata.h>
@@ -71,6 +72,7 @@ public:
     bool load_default_config(std::string& name, std::string& error) override;
     std::string list_inputs(std::size_t terminal_width = 100) const override;
     std::string list_outputs(std::size_t terminal_width = 100) const override;
+    std::string list_meters(std::string_view selector = {}) const override;
     std::string fader_status() const override;
     bool profile_start(std::string& error) override;
     std::string profile_stop(std::string& error) override;
@@ -90,6 +92,7 @@ private:
         std::atomic<bool> muted{false};
         std::atomic<std::uint32_t> output_mask{1};
         std::array<float, max_output_channels> smoothed_gain{};
+        std::array<meter::PeakRmsMeter, max_output_channels> meters;
     };
 
     struct PlaybackStream {
@@ -115,6 +118,7 @@ private:
         std::array<float, max_output_channels> smoothed_send_gain{};
         std::array<AudioRingBuffer, max_output_channels> audio;
         std::array<AudioRingBuffer, max_output_channels> send_audio;
+        meter::PeakRmsMeter meter;
     };
 
     struct PlaybackRouteState {
@@ -137,6 +141,7 @@ private:
         std::atomic<std::uint32_t> output_mask{0};
         float smoothed_gain = 1.0F;
         std::array<AudioRingBuffer, max_output_channels> audio;
+        meter::PeakRmsMeter meter;
     };
 
     struct OutputChannel {
@@ -159,6 +164,7 @@ private:
         std::array<std::string, 8> assigned_sink_names{};
         std::array<std::string, 8> assigned_sink_identities{};
         std::size_t assigned_sink_count = 0;
+        meter::PeakRmsMeter meter;
         float shutdown_fade_gain = 1.0F;
         std::uint32_t shutdown_fade_frames_remaining = 0;
         pw_stream* stream = nullptr;

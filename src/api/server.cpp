@@ -128,6 +128,14 @@ int run_server()
                 reply = audio_engine.list_outputs();
             } else if (input == "LIST-ALL") {
                 reply = audio_engine.list_inputs() + "\n" + audio_engine.list_outputs();
+            } else if (input == "METERS") {
+                reply = audio_engine.list_meters();
+            } else if (input.starts_with("METERS ")) {
+                std::istringstream parsed{std::string(input.substr(7))};
+                std::string selector, extra;
+                if (!(parsed >> std::quoted(selector)) || selector.empty() || (parsed >> extra))
+                    reply = "ERR expected METERS [channel selector]\n";
+                else reply = audio_engine.list_meters(selector);
             } else if (input == "FADER-STATUS") {
                 reply = audio_engine.fader_status();
             } else if (input.starts_with("FADER-SET ") || input.starts_with("FADER-INC ")) {

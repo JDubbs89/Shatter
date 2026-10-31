@@ -317,6 +317,11 @@ public:
         return output.str();
     }
 
+    std::string list_meters(std::string_view) const override
+    {
+        return "Live peak/RMS meters are unavailable for the PulseAudio backend.\n";
+    }
+
     std::string list_outputs(std::size_t) const override
     {
         std::vector<PlaybackSink> sinks;

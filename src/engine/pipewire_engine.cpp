@@ -791,6 +791,74 @@ std::string PipeWireEngine::list_outputs(std::size_t) const
     return table.str();
 }
 
+std::string PipeWireEngine::list_meters(std::string_view selector) const
+{
+    std::lock_guard lock(nodes_mutex_);
+    struct MeterRow { std::string scope, selector, peak, rms; };
+    std::vector<MeterRow> rows;
+    const auto matches = [selector](std::initializer_list<std::string_view> names) {
+        return selector.empty() || std::find(names.begin(), names.end(), selector) != names.end();
+    };
+    const auto append = [&rows](std::string scope, std::string name, meter::Reading reading,
+                                float gain = 1.0F) {
+        const auto format_dbfs = [](float linear) {
+            std::ostringstream value;
+            value << std::fixed << std::setprecision(1) << meter::to_dbfs(linear);
+            return value.str();
+        };
+        rows.push_back({std::move(scope), std::move(name), format_dbfs(reading.peak * gain),
+                        format_dbfs(reading.rms * gain)});
+    };
+
+    const auto channel_count = allocated_channels_.load(std::memory_order_relaxed);
+    const auto stream_count = allocated_streams_.load(std::memory_order_relaxed);
+    for (std::size_t channel_index = 0; channel_index < channel_count; ++channel_index) {
+        const auto& channel = app_channels_[channel_index];
+        if (!matches({channel.id, channel.identity, channel.name})) continue;
+        const auto output_mask = channel.output_mask.load(std::memory_order_relaxed);
+        std::size_t meter_output = max_output_channels;
+        for (std::size_t index = 0; index < max_output_channels; ++index) {
+            if ((output_mask & (1U << index)) != 0) { meter_output = index; break; }
+        }
+        if (meter_output < max_output_channels) {
+            append("app", channel.id + " (" + channel.name + ")", channel.meters[meter_output].reading());
+        } else {
+            float peak = 0.0F;
+            double square_sum = 0.0;
+            for (std::size_t stream_index = 0; stream_index < stream_count; ++stream_index) {
+                const auto& stream = playback_streams_[stream_index];
+                if (!stream.active.load(std::memory_order_relaxed) || stream.channel_index != channel_index) continue;
+                const auto reading = stream.meter.reading();
+                peak = std::max(peak, reading.peak);
+                square_sum += static_cast<double>(reading.rms) * reading.rms;
+            }
+            append("app", channel.id + " (" + channel.name + ")",
+                {peak, static_cast<float>(std::sqrt(square_sum))});
+        }
+    }
+    for (std::size_t stream_index = 0; stream_index < stream_count; ++stream_index) {
+        const auto& stream = playback_streams_[stream_index];
+        if (!stream.active.load(std::memory_order_relaxed) || !stream.in_use ||
+            !matches({stream.selector_id, stream.name})) continue;
+        append("stream", stream.selector_id + " (" + stream.name + ")", stream.meter.reading());
+    }
+    if (matches({"capture"})) {
+        append("capture", "capture", capture_channel_.meter.reading());
+    }
+    for (const auto& output : output_channels_) {
+        if (!output.in_use || !matches({output.name, output.node_name})) continue;
+        append("output", output.name + " (" + output.node_name + ")", output.meter.reading());
+    }
+
+    std::ostringstream result;
+    result << "Live meters (peak and RMS in dBFS; 100 ms windows; app readings use its first assigned output mix; stream, capture, and output readings are post-fader)\n"
+           << "Scope | Channel | Peak dBFS | RMS dBFS\n";
+    for (const auto& row : rows)
+        result << row.scope << " | " << row.selector << " | " << row.peak << " | " << row.rms << '\n';
+    if (rows.empty()) result << (selector.empty() ? "No active channels\n" : "No meter matches '" + std::string(selector) + "'\n");
+    return result.str();
+}
+
 std::string PipeWireEngine::fader_status() const
 {
     std::lock_guard lock(nodes_mutex_);
@@ -1022,6 +1090,7 @@ bool PipeWireEngine::replace_capture_source(std::string_view source_selector, st
     {
         std::lock_guard lock(nodes_mutex_);
         capture_channel_.source_node_id = source_node_id;
+        capture_channel_.meter.reset();
     }
     if (pw_stream_connect(capture_channel_.source_stream, PW_DIRECTION_INPUT, source_node_id,
             static_cast<pw_stream_flags>(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS |

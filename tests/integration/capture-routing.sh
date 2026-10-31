@@ -138,6 +138,11 @@ record_monitor "$test_root/send-off.raw"
 "$binary" assign capture capture speakers
 sleep 0.25
 record_monitor "$test_root/send-on.raw"
+capture_meter=$("$binary" meters capture)
+if ! printf '%s\n' "$capture_meter" | awk -F'|' '$1 ~ /^capture / && $3 + 0 > -60 && $4 + 0 > -60 { found=1 } END { exit !found }'; then
+    echo "selected capture meter did not report the active signal: $capture_meter" >&2
+    exit 1
+fi
 "$binary" set mute capture capture on
 inputs=$("$binary" list in)
 case "$inputs" in
