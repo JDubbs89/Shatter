@@ -45,9 +45,9 @@ constexpr std::string_view kUsage =
     "       shatter set capture <source|send> <value>\n"
     "       shatter rename <app|stream> <old-name> <new-name>\n"
     "       shatter make out <name>\n"
-    "       shatter delete out <name-or-pw-node-id>\n"
-    "       shatter assign out <output-name-or-id> <sink-name-or-id>\n"
-    "       shatter unassign out <output-name-or-id> <sink-name-or-id>\n"
+    "       shatter delete out <name-or-output-id>\n"
+    "       shatter assign out <output-name-or-id> <device-name-or-id>\n"
+    "       shatter unassign out <output-name-or-id> <device-name-or-id>\n"
     "       shatter assign app <app-name-or-id> <output-name-or-id>\n"
     "       shatter unassign app <app-name-or-id> <output-name-or-id>\n"
     "       shatter assign <capture|stream> <input-name-or-id> <output-name-or-id>\n"
@@ -276,7 +276,7 @@ int run_cli(int argc, char** argv)
             const bool output_sink = action == "--assign-output" || action == "--unassign-output";
             const bool assigned = action == "--assign-output" || action == "--assign-app-output";
             std::ostringstream command;
-            if (output_sink) command << (assigned ? "OUTPUT-SINK-ASSIGN " : "OUTPUT-SINK-UNASSIGN ");
+            if (output_sink) command << (assigned ? "OUTPUT-DEVICE-ASSIGN " : "OUTPUT-DEVICE-UNASSIGN ");
             else command << (assigned ? "APP-OUTPUT-ASSIGN " : "APP-OUTPUT-UNASSIGN ");
             command << std::quoted(argv[2]) << ' ' << std::quoted(argv[3]);
             const std::string response = shatter::api::request(command.str());
@@ -461,14 +461,7 @@ int run_cli(int argc, char** argv)
         }
 
         if (argc == 3 && std::string_view(argv[1]) == "--set-capture-source") {
-            std::uint32_t source_id = 0;
-            const std::string_view value(argv[2]);
-            const auto [end, parse_error] = std::from_chars(value.data(), value.data() + value.size(), source_id);
-            if (parse_error != std::errc{} || end != value.data() + value.size()) {
-                std::cerr << "Capture source id must be a PipeWire node id.\n";
-                return 2;
-            }
-            const std::string response = shatter::api::request("CAPTURE-SOURCE " + std::string(value));
+            const std::string response = shatter::api::request("CAPTURE-SOURCE " + std::string(argv[2]));
             if (response.empty()) {
                 std::cerr << "Shatter engine is unavailable; run `shatter start` first.\n";
                 return 1;
@@ -521,7 +514,7 @@ int run_cli(int argc, char** argv)
         if (command == "status") {
             const std::string response = shatter::api::request("PING");
             if (response.starts_with("OK running audio-ready")) {
-                std::cout << "Shatter engine is running; PipeWire audio is ready.\n";
+                std::cout << "Shatter engine is running; audio backend is ready.\n";
             } else if (response.starts_with("OK running audio-unavailable:")) {
                 std::cout << "Shatter engine is running; " << response.substr(std::string("OK running ").size());
             } else {

@@ -316,13 +316,16 @@ int run_server()
                 if (!(parsed >> action >> std::quoted(selector)) || (parsed >> extra)) reply = "ERR expected OUTPUT-DELETE <name-or-id>\n";
                 else if (audio_engine.delete_output(selector, output_error)) reply = "OK output channel deleted: " + selector + "\n";
                 else reply = "ERR " + output_error + "\n";
-            } else if (input.starts_with("OUTPUT-SINK-")) {
+            } else if (input.starts_with("OUTPUT-DEVICE-") || input.starts_with("OUTPUT-SINK-")) {
                 std::istringstream parsed{std::string(input)};
-                std::string action, output, sink, extra, output_error;
-                if (!(parsed >> action >> std::quoted(output) >> std::quoted(sink)) || (parsed >> extra)) reply = "ERR expected OUTPUT-SINK <output> <sink>\n";
-                else if (audio_engine.assign_output_destination(output, sink,
-                             action == "OUTPUT-SINK-ASSIGN", output_error))
-                    reply = std::string("OK output sink ") + (action == "OUTPUT-SINK-ASSIGN" ? "assigned\n" : "unassigned\n");
+                std::string action, output, device, extra, output_error;
+                const bool parsed_request = static_cast<bool>(parsed >> action >> std::quoted(output) >> std::quoted(device));
+                const bool assign = action == "OUTPUT-DEVICE-ASSIGN" || action == "OUTPUT-SINK-ASSIGN";
+                const bool unassign = action == "OUTPUT-DEVICE-UNASSIGN" || action == "OUTPUT-SINK-UNASSIGN";
+                if (!parsed_request || (parsed >> extra) || (!assign && !unassign))
+                    reply = "ERR expected OUTPUT-DEVICE <output> <device>\n";
+                else if (audio_engine.assign_output_destination(output, device, assign, output_error))
+                    reply = std::string("OK output playback device ") + (assign ? "assigned\n" : "unassigned\n");
                 else reply = "ERR " + output_error + "\n";
             } else if (input.starts_with("APP-OUTPUT-")) {
                 std::istringstream parsed{std::string(input)};

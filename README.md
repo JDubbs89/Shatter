@@ -32,7 +32,7 @@ Run the repository install script to build and install `shatter` into `~/.local/
 sh install.sh
 ```
 
-The background engine discovers application playback streams and assigns each stream to a per-application channel. Use `shatter list in` to find app names, channel IDs, and stream names. Gain and mute accept either the current user-facing name or the corresponding ID. Rename an app channel or stream to set a display alias; this does not change app grouping or audio processing. Names must match exactly; if a name is ambiguous, use the channel or PipeWire node ID. Quote names that contain spaces.
+The background engine discovers application playback streams and assigns each stream to a per-application channel. Use `shatter list in` to find app names, channel IDs, and stream IDs. Gain and mute accept either the current user-facing name or the corresponding ID. Rename an app channel or stream to set a display alias; this does not change app grouping or audio processing. Names must match exactly; if a name is ambiguous, use the listed Shatter ID. Stream selectors identify currently active streams and can change after a restart. Quote names that contain spaces.
 
 ```sh
 shatter start
@@ -54,12 +54,12 @@ shatter set mute capture capture on
 shatter set mute output Headphones off
 shatter rename app Brave Browser
 shatter rename stream Brave-1 "Browser music"
-shatter list in # choose a capture source node ID
-shatter set capture source 57
+shatter list in # choose a capture device ID
+shatter set capture source <capture-device-id>
 shatter set gain capture -6
 shatter set capture send on
 shatter make out Headphones
-shatter assign out Headphones sink-57
+shatter assign out Headphones <device-id>
 shatter assign app Brave Headphones
 shatter unassign app Brave speakers
 shatter list out
@@ -70,7 +70,7 @@ shatter stop profile
 
 The older dash-prefixed command forms remain accepted as compatibility aliases.
 
-`shatter list out` shows Shatter outputs and available playback sinks. Use the generated `sink-<PipeWire node ID>` value shown there when routing an output. User-created outputs remain disconnected until you assign one to a playback sink. Use `shatter unassign out <output> <sink>` to detach it, and `shatter delete out <output>` to remove it.
+`shatter list out` shows Shatter outputs and available playback devices. Use the stable `device-<id>` value shown there when routing an output. User-created outputs remain disconnected until you assign one to a playback device. Use `shatter unassign out <output> <device>` to detach it, and `shatter delete out <output>` to remove it.
 
 Profiling requires the engine's PipeWire output to be ready. The stop command prints callback timing percentiles, callback budget overruns, process CPU time, dropped and unfilled ring-buffer frames, Shatter input ring occupancy, and PipeWire's reported device delay and queued audio. Unfilled ring frames can include idle or silent streams. Callback timing measures Shatter's processing work; ring occupancy, PipeWire delay, and queued audio are separate parts of the audio path, and this summary is not an end-to-end loopback latency measurement.
 

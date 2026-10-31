@@ -105,6 +105,12 @@ sleep 0.3
 "$binary" start
 engine_running=1
 
+listed_device_id()
+{
+    device_name=$1
+    "$binary" --list-out | awk -F'|' -v wanted="$device_name" 'index($0, wanted) { id=$2; gsub(/^[[:space:]]+|[[:space:]]+$/, "", id); print id; exit }'
+}
+
 wait_for_apps()
 {
     expected=$1
@@ -123,6 +129,10 @@ wait_for_apps()
 }
 
 inputs=$(wait_for_apps 1)
+if printf '%s\n' "$inputs" | grep -Eq 'PipeWire|sink-[0-9]+|source-[0-9]+'; then
+    echo "input listing exposed a backend-specific selector: $inputs" >&2
+    exit 1
+fi
 stream_default_sends=$(printf '%s\n' "$inputs" | awk -F'|' '/\/ stream/ { gsub(/^[[:space:]]+|[[:space:]]+$/, "", $7); print $7; exit }')
 app_default_sends=$(printf '%s\n' "$inputs" | awk -F'|' '/\/ app[[:space:]]*\|/ { gsub(/^[[:space:]]+|[[:space:]]+$/, "", $7); print $7; exit }')
 if [ "$stream_default_sends" != "off" ] || [ "$app_default_sends" != "speakers" ]; then
@@ -231,7 +241,7 @@ record_monitor "$test_root/app-quiet.raw"
 "$binary" --set-gain app "$app_a_id" 0
 
 stream_a_id=$(printf '%s\n' "$inputs" | awk -F'|' -v channel="$app_a_id" '
-    index($0, channel " / stream") { row=$6; sub(/^.*\(/, "", row); sub(/\).*/, "", row); print row; exit }
+    index($0, channel " / stream") { row=$6; gsub(/^[[:space:]]+/, "", row); sub(/[[:space:]].*$/, "", row); print row; exit }
 ')
 if [ -z "$stream_a_id" ]; then
     echo "$inputs" >&2
@@ -253,11 +263,9 @@ esac
 "$binary" --set-mute app "$app_a_id" on
 "$binary" --set-mute app "$app_a_id" off
 
-# A named output is an independently routable PipeWire playback node.
-if "$binary" make out "$headphones_sink_id" >/dev/null 2>&1; then
-    echo "numeric output name was accepted even though numeric selectors mean PipeWire node IDs" >&2
-    exit 1
-fi
+# Numeric output names are ordinary Shatter names and do not select backend nodes.
+"$binary" make out 57
+"$binary" delete out 57
 if "$binary" make out shatter.output.1 >/dev/null 2>&1; then
     echo "generated PipeWire node name was accepted as an output name" >&2
     exit 1
@@ -281,8 +289,10 @@ case "$fader_status" in
 esac
 "$binary" set fader output "Headphone Monitor" -inf
 "$binary" inc fader output "Headphone Monitor" +60
-"$binary" assign out "Headphone Monitor" "sink-$anchor_sink_id"
-"$binary" assign out "Headphone Monitor" "sink-$headphones_sink_id"
+anchor_device_id=$(listed_device_id shatter-test-anchor)
+"$binary" assign out "Headphone Monitor" "$anchor_device_id"
+headphones_device_id=$(listed_device_id shatter-test-headphones)
+"$binary" assign out "Headphone Monitor" "$headphones_device_id"
 "$binary" assign app "$app_a_id" "Headphone Monitor"
 "$binary" --set-gain stream "$stream_a_id" 0
 pw-cli destroy "$headphones_sink_id" >/dev/null
@@ -306,7 +316,7 @@ for attempt in $(seq 1 50); do
     if [ -n "$headphones_sink_id" ]; then
         output_listing=$("$binary" --list-out)
         case "$output_listing" in
-            *"sink-$headphones_sink_id"*) break ;;
+            *"$headphones_device_id"*) break ;;
             *) headphones_sink_id= ;;
         esac
     fi
@@ -319,7 +329,7 @@ if [ -z "$headphones_sink_id" ]; then
 fi
 output_listing=$("$binary" --list-out)
 case "$output_listing" in
-    *"Headphone Monitor"*"sink-$headphones_sink_id"*) ;;
+    *"Headphone Monitor"*"$headphones_device_id"*) ;;
     *) echo "named output sink link is missing: $output_listing" >&2; pw-link -l >&2; exit 1 ;;
 esac
 reconnected_link=0
@@ -368,7 +378,7 @@ if awk -v rms="$(audio_rms "$test_root/output-muted.raw")" 'BEGIN { exit !(rms >
 fi
 "$binary" set mute output "Headphone Monitor" off
 "$binary" set gain output "Headphone Monitor" 0
-"$binary" unassign out "Headphone Monitor" "sink-$anchor_sink_id"
+"$binary" unassign out "Headphone Monitor" "$anchor_device_id"
 "$binary" assign stream "$stream_a_id" speakers
 "$binary" assign stream "$stream_a_id" "Headphone Monitor"
 sleep 0.3
@@ -393,12 +403,13 @@ awk -v stream="$stream_only_rms" -v app="$app_only_rms" 'BEGIN { exit !(stream <
 }
 "$binary" --set-gain app "$app_a_id" 0
 "$binary" assign app "$app_a_id" "Headphone Monitor"
-"$binary" assign out "Headphone Monitor" "sink-$sink_id"
+speakers_device_id=$(listed_device_id shatter-test-speakers)
+"$binary" assign out "Headphone Monitor" "$speakers_device_id"
 sleep 0.3
 pw-link -l >&2
 output_listing=$("$binary" --list-out)
 case "$output_listing" in
-    *"Headphone Monitor"*"sink-$headphones_sink_id"*"sink-$sink_id"*) ;;
+    *"Headphone Monitor"*"$headphones_device_id"*"$speakers_device_id"*) ;;
     *) echo "output was not listed on both playback sinks: $output_listing" >&2; pw-link -l >&2; exit 1 ;;
 esac
 record_monitor "$test_root/multi-sink-speakers.raw" 96000 shatter-test-speakers
@@ -414,19 +425,20 @@ if rms < 0.005:
     raise SystemExit("named output did not deliver audio to its second sink: rms=%s" % rms)
 PY
 # Keep the system-default sink as the output's primary target; headphones are an explicit secondary route.
-"$binary" unassign out "Headphone Monitor" "sink-$headphones_sink_id"
-"$binary" assign out "Headphone Monitor" "sink-$headphones_sink_id"
+"$binary" unassign out "Headphone Monitor" "$headphones_device_id"
+headphones_device_id=$(listed_device_id shatter-test-headphones)
+"$binary" assign out "Headphone Monitor" "$headphones_device_id"
 "$binary" save show routes
 config_file="$XDG_CONFIG_HOME/shatter/routes.conf"
 grep -F 'O 1 "shatter.output.1" "Headphone Monitor"' "$config_file" >/dev/null || {
     echo "saved show omitted the output name or generated identity" >&2; cat "$config_file" >&2; exit 1;
 }
-grep -F 'B "shatter.output.1" "shatter-test-headphones-path" "shatter-test-headphones"' "$config_file" >/dev/null || {
+grep -F 'D "shatter.output.1" "device:shatter-test-headphones-path" "shatter-test-headphones"' "$config_file" >/dev/null || {
     echo "saved show omitted the stable physical sink identity" >&2; cat "$config_file" >&2; exit 1;
 }
 "$binary" delete out "Headphone Monitor"
 cp "$config_file" "$test_root/routes.conf"
-sed 's/"shatter-test-headphones-path" "shatter-test-headphones"/"missing-device-path" "missing-device"/' \
+sed 's/"device:shatter-test-headphones-path" "shatter-test-headphones"/"device:missing-device" "missing-device"/' \
     "$test_root/routes.conf" >"$config_file"
 "$binary" load show routes
 output_listing=$("$binary" list out)
@@ -456,7 +468,7 @@ headphones_sink_id=
 for attempt in $(seq 1 50); do
     headphones_sink_id=$(wpctl status -n | awk '/shatter-test-headphones/ { for (i=1; i<=NF; ++i) if ($i ~ /^[0-9]+\.$/) { id=$i; sub(/\.$/, "", id); print id; exit } }')
     output_listing=$("$binary" list out)
-    if [ -n "$headphones_sink_id" ] && printf '%s\n' "$output_listing" | awk -v sink="sink-$headphones_sink_id" \
+    if [ -n "$headphones_sink_id" ] && printf '%s\n' "$output_listing" | awk -v sink="$headphones_device_id" \
         '/Headphone Monitor/ && index($0, sink) { found=1 } END { exit !found }'; then break; fi
     headphones_sink_id=
     sleep 0.1
@@ -479,11 +491,11 @@ if [ "$reconnected_link" -ne 1 ]; then
     echo "loaded show did not restore its saved physical sink route" >&2
     exit 1
 fi
-"$binary" unassign out "Headphone Monitor" "sink-$headphones_sink_id"
+"$binary" unassign out "Headphone Monitor" "$headphones_device_id"
 sleep 0.3
 output_row=$(printf '%s\n' "$($binary --list-out)" | awk '/Headphone Monitor/ { print; exit }')
 case "$output_row" in
-    *"sink-$sink_id"*) ;;
+    *"$speakers_device_id"*) ;;
     *) echo "unassigning one sink removed the remaining route: $output_row" >&2; exit 1 ;;
 esac
 record_monitor "$test_root/remaining-sink.raw" 96000 shatter-test-speakers
@@ -498,11 +510,11 @@ rms = math.sqrt(sum(sample * sample for sample in samples) / len(samples)) if sa
 if rms < 0.005:
     raise SystemExit("remaining sink stopped receiving output audio: rms=%s" % rms)
 PY
-"$binary" unassign out "Headphone Monitor" "sink-$sink_id"
+"$binary" unassign out "Headphone Monitor" "$speakers_device_id"
 sleep 0.3
 output_row=$(printf '%s\n' "$($binary --list-out)" | awk '/Headphone Monitor/ { print; exit }')
 case "$output_row" in
-    *"sink-"*) echo "all routes were not removed: $output_row" >&2; exit 1 ;;
+    *"device-"*) echo "all routes were not removed: $output_row" >&2; exit 1 ;;
     *) ;;
 esac
 "$binary" unassign app "$app_a_id" "Headphone Monitor"
@@ -515,7 +527,7 @@ wait "$initial_playback_pid" 2>/dev/null || true
 removed=0
 for attempt in $(seq 1 50); do
     inputs=$("$binary" --list-in)
-    if ! printf '%s\n' "$inputs" | grep -q "($stream_a_id)"; then removed=1; break; fi
+    if ! printf '%s\n' "$inputs" | grep -q "$stream_a_id"; then removed=1; break; fi
     sleep 0.1
 done
 if [ "$removed" -ne 1 ]; then
@@ -541,7 +553,7 @@ kill "$unrelated_playback_pid"
 wait "$unrelated_playback_pid" 2>/dev/null || true
 for attempt in $(seq 1 50); do
     inputs=$("$binary" --list-in)
-    if ! printf '%s\n' "$inputs" | grep -q 'TestAppB.*\/ stream'; then break; fi
+    if ! printf '%s\n' "$inputs" | grep -q 'TestAppB.*/ stream'; then break; fi
     sleep 0.1
 done
 
@@ -564,7 +576,7 @@ if [ "$recreated_sends" != "speakers, Headpho..." ]; then
     echo "recreated playback stream did not restore its output send: $recreated_stream" >&2
     exit 1
 fi
-recreated_stream_id=$(printf '%s\n' "$recreated_stream" | awk -F'|' '{ row=$6; sub(/^.*\(/, "", row); sub(/\).*/, "", row); print row }')
+recreated_stream_id=$(printf '%s\n' "$recreated_stream" | awk -F'|' '{ row=$6; gsub(/^[[:space:]]+/, "", row); sub(/[[:space:]].*$/, "", row); print row }')
 "$binary" --set-gain stream "$recreated_stream_id" 0
 "$binary" --set-mute stream "$recreated_stream_id" off
 "$binary" unassign stream "$recreated_stream_id" "Headphone Monitor"
@@ -578,7 +590,7 @@ kill "$recreated_playback_pid"
 wait "$recreated_playback_pid" 2>/dev/null || true
 for attempt in $(seq 1 50); do
     inputs=$("$binary" --list-in)
-    if ! printf '%s\n' "$inputs" | grep -q "($recreated_stream_id)"; then break; fi
+    if ! printf '%s\n' "$inputs" | grep -q "$recreated_stream_id"; then break; fi
     sleep 0.1
 done
 
@@ -596,7 +608,7 @@ if [ -z "$app_b_id" ] || [ "$app_a_id" = "$app_b_id" ]; then
     exit 1
 fi
 stream_a_ids=$(printf '%s\n' "$inputs" | awk -F'|' -v channel="$app_a_id" '
-    index($0, channel " / stream") { row=$6; sub(/^.*\(/, "", row); sub(/\).*/, "", row); print row }
+    index($0, channel " / stream") { row=$6; gsub(/^[[:space:]]+/, "", row); sub(/[[:space:]].*$/, "", row); print row }
 ')
 set -- $stream_a_ids
 if [ "$#" -ne 2 ]; then

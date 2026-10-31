@@ -37,14 +37,14 @@ void PipeWireEngine::handle_playback_node(std::uint32_t node_id, NodeInfo node)
         if (stream_by_node_.contains(node_id)) {
             return;
         }
-        if (node.application_id.empty() && node.process_binary.empty() && node.application.empty()) {
-            node.identity = "node:" + std::to_string(node_id);
-        } else if (!node.application_id.empty()) {
+        if (!node.application_id.empty()) {
             node.identity = "app-id:" + node.application_id;
         } else if (!node.process_binary.empty()) {
             node.identity = "binary:" + node.process_binary;
         } else {
-            node.identity = "app-name:" + node.application;
+            const std::string fallback_name = !node.application.empty() ? node.application :
+                !node.name.empty() ? node.name : node.description;
+            node.identity = "app-name:" + (fallback_name.empty() ? std::string("unknown") : fallback_name);
         }
         node.channel_index = get_or_create_channel_locked(node);
         if (node.channel_index >= max_app_channels) {
@@ -80,6 +80,7 @@ void PipeWireEngine::handle_playback_node(std::uint32_t node_id, NodeInfo node)
         stream->channel_index = node.channel_index;
         stream->name = node.name.empty() ? node.description : node.name;
         stream->original_name = stream->name;
+        stream->selector_id = "stream-" + std::to_string(next_stream_selector_id_++);
         stream->application = node.application;
         for (const auto& saved : loaded_show_.streams) {
             if (saved.app_identity == node.identity && saved.original_name == stream->original_name) {

@@ -71,6 +71,12 @@ target_compile_features(dsp_test PRIVATE cxx_std_20)
 target_link_libraries(dsp_test PRIVATE Catch2::Catch2WithMain)
 add_test(NAME dsp COMMAND dsp_test)
 
+add_executable(state_store_test src/state/store.cpp tests/unit/state-store.cpp)
+target_include_directories(state_store_test PRIVATE include)
+target_compile_features(state_store_test PRIVATE cxx_std_20)
+target_link_libraries(state_store_test PRIVATE Catch2::Catch2WithMain)
+add_test(NAME state_store COMMAND state_store_test)
+
 find_program(PIPEWIRE_TEST_EXECUTABLE pipewire)
 find_program(WIREPLUMBER_TEST_EXECUTABLE wireplumber)
 find_program(PW_CLI_TEST_EXECUTABLE pw-cli)

@@ -1,0 +1,31 @@
+#pragma once
+
+#include <cstdint>
+#include <iomanip>
+#include <sstream>
+#include <string>
+#include <string_view>
+
+namespace shatter::engine {
+
+inline std::string make_stable_selector_id(std::string_view prefix, std::string_view identity)
+{
+    std::uint64_t hash = 14695981039346656037ULL;
+    for (const unsigned char character : identity) {
+        hash ^= character;
+        hash *= 1099511628211ULL;
+    }
+    std::ostringstream result;
+    result << prefix << '-' << std::hex << std::setw(16) << std::setfill('0') << hash;
+    return result.str();
+}
+
+inline std::string stable_device_identity(std::string_view backend_identity, std::string_view name)
+{
+    if (backend_identity.starts_with("device:") || backend_identity.starts_with("device-name:"))
+        return std::string(backend_identity);
+    if (!backend_identity.empty()) return "device:" + std::string(backend_identity);
+    return name.empty() ? std::string{} : "device-name:" + std::string(name);
+}
+
+} // namespace shatter::engine

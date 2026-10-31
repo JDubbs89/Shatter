@@ -14,7 +14,8 @@ namespace shatter::state {
 namespace {
 
 constexpr std::string_view kHeaderV1 = "SHATTER-CONFIG 1";
-constexpr std::string_view kHeader = "SHATTER-CONFIG 2";
+constexpr std::string_view kHeaderV2 = "SHATTER-CONFIG 2";
+constexpr std::string_view kHeader = "SHATTER-CONFIG 3";
 constexpr float kMinimumGainDb = -60.0F;
 constexpr float kMaximumGainDb = 12.0F;
 
@@ -134,11 +135,13 @@ bool Store::load(std::string_view name, Show& show, std::string& error) const
             return false;
         }
         std::string header;
-        if (!std::getline(file, header) || (header != kHeader && header != kHeaderV1)) {
+        if (!std::getline(file, header) ||
+            (header != kHeader && header != kHeaderV2 && header != kHeaderV1)) {
             error = "unsupported or invalid configuration format";
             return false;
         }
-        const bool version_two = header == kHeader;
+        const bool version_two = header == kHeaderV2 || header == kHeader;
+        const bool version_three = header == kHeader;
 
         Show loaded;
         std::map<std::string, std::size_t> outputs_by_identity;
@@ -202,12 +205,12 @@ bool Store::load(std::string_view name, Show& show, std::string& error) const
                 }
                 outputs_by_identity[item.identity] = loaded.outputs.size();
                 loaded.outputs.push_back(std::move(item));
-            } else if (type == 'B' && version_two) {
+            } else if ((type == 'B' && header == kHeaderV2) || (type == 'D' && version_three)) {
                 std::string output_identity;
-                SinkBinding binding;
+                DeviceBinding binding;
                 if (!(row >> std::quoted(output_identity) >> std::quoted(binding.identity) >>
                       std::quoted(binding.name)) || binding.name.empty()) {
-                    error = "invalid output sink binding in configuration";
+                    error = "invalid output device binding in configuration";
                     return false;
                 }
                 const auto output = outputs_by_identity.find(output_identity);
@@ -215,7 +218,7 @@ bool Store::load(std::string_view name, Show& show, std::string& error) const
                     error = "output sink binding references an unknown output";
                     return false;
                 }
-                loaded.outputs[output->second].sinks.push_back(std::move(binding));
+                loaded.outputs[output->second].devices.push_back(std::move(binding));
             } else if (type == 'C' && version_two) {
                 if (loaded.has_capture_sends) { error = "duplicate capture entry in configuration"; return false; }
                 std::size_t send_count = 0;
@@ -228,6 +231,12 @@ bool Store::load(std::string_view name, Show& show, std::string& error) const
                         return false;
                     }
                     loaded.capture_output_identities.push_back(std::move(identity));
+                }
+            } else if (type == 'M' && version_three) {
+                if (!loaded.capture_source_identity.empty() || !(row >> std::quoted(loaded.capture_source_identity)) ||
+                    loaded.capture_source_identity.empty()) {
+                    error = "invalid capture device identity in configuration";
+                    return false;
                 }
             } else {
                 error = "unknown entry in configuration";
@@ -268,10 +277,10 @@ bool Store::save(std::string_view name, const Show& show, std::string& error) co
             }
             file << "O " << output.slot << ' ' << std::quoted(output.identity) << ' '
                  << std::quoted(output.name) << '\n';
-            for (const auto& sink : output.sinks) {
-                if (sink.name.empty()) { error = "output sink name cannot be empty"; return false; }
-                file << "B " << std::quoted(output.identity) << ' ' << std::quoted(sink.identity)
-                     << ' ' << std::quoted(sink.name) << '\n';
+            for (const auto& device : output.devices) {
+                if (device.name.empty()) { error = "output device name cannot be empty"; return false; }
+                file << "D " << std::quoted(output.identity) << ' ' << std::quoted(device.identity)
+                     << ' ' << std::quoted(device.name) << '\n';
             }
         }
         for (const auto& app : show.apps) {
@@ -298,6 +307,8 @@ bool Store::save(std::string_view name, const Show& show, std::string& error) co
         file << "C " << show.capture_output_identities.size();
         for (const auto& identity : show.capture_output_identities) file << ' ' << std::quoted(identity);
         file << '\n';
+        if (!show.capture_source_identity.empty())
+            file << "M " << std::quoted(show.capture_source_identity) << '\n';
         file.close();
         if (!file) {
             error = "failed while writing configuration file";

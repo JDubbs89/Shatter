@@ -84,14 +84,16 @@ fi
 "$binary" start
 engine_running=1
 "$binary" make out "Capture Monitor"
-"$binary" assign out "Capture Monitor" "sink-$sink_id"
+listed_device_id=$($binary list out | awk -F'|' '/shatter-test-speakers/ { id=$2; gsub(/^[[:space:]]+|[[:space:]]+$/, "", id); print id; exit }')
+"$binary" assign out "Capture Monitor" "$listed_device_id"
 inputs=$($binary --list-in)
+source_selector=$(printf '%s\n' "$inputs" | awk -F'|' '/shatter-test-mic-source/ { id=$2; gsub(/^[[:space:]]+|[[:space:]]+$/, "", id); print id; exit }')
 case "$inputs" in
-    *"Available capture sources"*"source-$source_id"*"shatter-test-mic-source"*) ;;
+    *"Available capture sources"*"$source_selector"*"shatter-test-mic-source"*) ;;
     *) echo "selected source is missing from input list: $inputs" >&2; exit 1 ;;
 esac
 
-"$binary" --set-capture-source "$source_id"
+"$binary" --set-capture-source "$source_selector"
 "$binary" set fader capture capture -6
 fader_status=$("$binary" fader status)
 case "$fader_status" in
@@ -147,6 +149,10 @@ record_monitor "$test_root/capture-muted.raw"
 "$binary" set mute capture capture off
 "$binary" assign capture capture "Capture Monitor"
 "$binary" save show capture-routes
+config_file="$XDG_CONFIG_HOME/shatter/capture-routes.conf"
+grep -F 'M "device-name:shatter-test-mic-source"' "$config_file" >/dev/null || {
+    echo "saved show omitted the selected capture device identity" >&2; cat "$config_file" >&2; exit 1;
+}
 "$binary" unassign capture capture speakers
 "$binary" unassign capture capture "Capture Monitor"
 "$binary" delete out "Capture Monitor"
@@ -156,9 +162,13 @@ case "$inputs" in
     *"capture"*"speakers, Capture..."*) ;;
     *) echo "loaded show did not restore capture sends: $inputs" >&2; exit 1 ;;
 esac
+case "$inputs" in
+    *"$source_selector"*"selected"*) ;;
+    *) echo "loaded show did not restore the selected capture device: $inputs" >&2; exit 1 ;;
+esac
 outputs=$("$binary" list out)
 case "$outputs" in
-    *"Capture Monitor"*"sink-$sink_id"*) ;;
+    *"Capture Monitor"*"$listed_device_id"*) ;;
     *) echo "loaded show did not restore the named output and sink binding: $outputs" >&2; exit 1 ;;
 esac
 sleep 0.25

@@ -100,6 +100,7 @@ private:
         std::size_t channel_index = 0;
         std::string name;
         std::string original_name;
+        std::string selector_id;
         std::string application;
         std::string sink_name;
         pw_stream* sink = nullptr;
@@ -163,7 +164,7 @@ private:
 
     struct CaptureSourceRequest {
         PipeWireEngine* engine = nullptr;
-        std::uint32_t source_node_id = PW_ID_ANY;
+        std::string source_selector;
         bool succeeded = false;
         std::string error;
     };
@@ -247,7 +248,7 @@ private:
     void destroy_output_stream(OutputChannel& output);
     void handle_playback_node(std::uint32_t node_id, NodeInfo node);
     void create_stream_sink(PlaybackStream& stream);
-    bool replace_capture_source(std::uint32_t source_node_id, std::string& error);
+    bool replace_capture_source(std::string_view source_selector, std::string& error);
     void destroy_capture_stream();
     void assign_stream_target(PlaybackStream& stream);
     std::size_t get_or_create_channel_locked(const NodeInfo& node);
@@ -291,6 +292,7 @@ private:
     CaptureChannel capture_channel_{};
     std::atomic<std::size_t> allocated_channels_{0};
     std::atomic<std::size_t> allocated_streams_{0};
+    std::uint64_t next_stream_selector_id_ = 1;
     std::atomic<std::uint32_t> unrouted_playback_streams_{0};
     std::atomic<std::uint32_t> speaker_node_id_{PW_ID_ANY};
     std::atomic<bool> output_linked_{false};

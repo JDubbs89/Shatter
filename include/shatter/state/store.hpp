@@ -27,7 +27,7 @@ struct StreamSetting {
     bool has_output_sends = false;
 };
 
-struct SinkBinding {
+struct DeviceBinding {
     std::string identity;
     std::string name;
 };
@@ -36,7 +36,7 @@ struct OutputSetting {
     std::size_t slot = 0;
     std::string identity;
     std::string name;
-    std::vector<SinkBinding> sinks;
+    std::vector<DeviceBinding> devices;
 };
 
 struct Show {
@@ -45,6 +45,7 @@ struct Show {
     std::vector<OutputSetting> outputs;
     std::vector<std::string> capture_output_identities;
     bool has_capture_sends = false;
+    std::string capture_source_identity;
 };
 
 class Store {
