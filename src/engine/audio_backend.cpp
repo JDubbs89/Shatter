@@ -1,6 +1,6 @@
 #include "shatter/engine/audio_backend.hpp"
 
-#include "shatter/engine/pipewire_engine.hpp"
+#include "pipewire_engine.hpp"
 
 #include <memory>
 

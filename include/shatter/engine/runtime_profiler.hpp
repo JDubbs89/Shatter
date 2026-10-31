@@ -15,6 +15,9 @@ namespace shatter::engine {
 // Bounded, allocation-free callback timing storage. Callback durations are
 // placed in logarithmic nanosecond buckets so RT callbacks never need a lock.
 class RuntimeProfiler {
+    static_assert(std::atomic<std::uint64_t>::is_always_lock_free,
+                  "real-time profiler counters require lock-free 64-bit atomics");
+
 public:
     enum class Callback : std::size_t { input = 0, output = 1 };
     static constexpr std::size_t histogram_buckets = 64;
@@ -205,8 +208,12 @@ private:
     static void update_max(std::atomic<std::uint64_t>& target, std::uint64_t value) noexcept
     {
         auto current = target.load(std::memory_order_relaxed);
-        while (current < value && !target.compare_exchange_weak(
-                   current, value, std::memory_order_relaxed, std::memory_order_relaxed)) {}
+        if (current < value) {
+            // A missed update only makes this diagnostic maximum approximate;
+            // callback timing must not retry indefinitely under contention.
+            target.compare_exchange_strong(current, value,
+                std::memory_order_relaxed, std::memory_order_relaxed);
+        }
     }
 
     void record(Callback callback, std::uint64_t elapsed_ns, std::uint64_t frames,

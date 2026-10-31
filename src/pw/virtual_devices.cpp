@@ -1,4 +1,4 @@
-#include "shatter/engine/pipewire_engine.hpp"
+#include "pipewire_engine.hpp"
 
 #include <pipewire/keys.h>
 #include <pipewire/stream.h>
@@ -14,8 +14,6 @@ namespace shatter::engine {
 namespace {
 constexpr std::uint32_t kSampleRate = 48000;
 constexpr std::uint32_t kChannels = 2;
-constexpr std::uint32_t kMixerClosed = 1U << 31U;
-constexpr std::uint32_t kMixerUserMask = kMixerClosed - 1U;
 
 spa_pod* build_stereo_format(spa_pod_builder* builder)
 {
@@ -70,7 +68,6 @@ void PipeWireEngine::handle_playback_node(std::uint32_t node_id, NodeInfo node)
         stream = &playback_streams_[stream_index];
         stream->engine = this;
         stream->in_use = true;
-        stream->mixer_users.store(0, std::memory_order_relaxed);
         stream->target_gain.store(1.0F, std::memory_order_relaxed);
         stream->muted.store(false, std::memory_order_relaxed);
         stream->output_mask.store(0, std::memory_order_relaxed);
@@ -176,18 +173,18 @@ void PipeWireEngine::destroy_output_stream(OutputChannel& output)
     output.active.store(false, std::memory_order_release);
     output.linked.store(false, std::memory_order_release);
     output.sink_count = 0;
-    output.mixer_users.fetch_or(kMixerClosed, std::memory_order_acq_rel);
-    output.input_users.fetch_or(kMixerClosed, std::memory_order_acq_rel);
+    output.process_gate.close();
+    output.input_gate.close();
     if (output.stream != nullptr) {
         pw_stream_disconnect(output.stream);
+        output.process_gate.wait_for_quiescence();
         pw_stream_destroy(output.stream);
         output.stream = nullptr;
     }
-    while ((output.mixer_users.load(std::memory_order_acquire) & kMixerUserMask) != 0)
-        std::this_thread::yield();
-    while ((output.input_users.load(std::memory_order_acquire) & kMixerUserMask) != 0)
-        std::this_thread::yield();
-    output.mixer_users.store(0, std::memory_order_release);
+    output.process_gate.wait_for_quiescence();
+    output.input_gate.wait_for_quiescence();
+    output.process_gate.reopen();
+    output.input_gate.reopen();
 }
 
 } // namespace shatter::engine

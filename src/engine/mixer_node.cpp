@@ -1,4 +1,4 @@
-#include "shatter/engine/pipewire_engine.hpp"
+#include "pipewire_engine.hpp"
 #include "shatter/engine/dsp.hpp"
 
 #include <pipewire/stream.h>
@@ -13,8 +13,6 @@ namespace {
 constexpr std::uint32_t kSampleRate = 48000;
 constexpr std::uint32_t kChannels = 2;
 constexpr std::uint32_t kShutdownFadeFrames = kSampleRate / 4;
-constexpr std::uint32_t kMixerClosed = 1U << 31U;
-constexpr std::uint32_t kMixerUserMask = kMixerClosed - 1U;
 
 } // namespace
 
@@ -39,6 +37,11 @@ void PipeWireEngine::on_capture_source_process(void* data)
 
 void PipeWireEngine::stream_input_process(PlaybackStream& stream)
 {
+    RealtimeAccessGate::Guard process_guard(stream.process_gate);
+    if (!process_guard) return;
+    std::array<std::uint32_t, max_output_channels> output_generations{};
+    for (std::size_t index = 0; index < output_generations.size(); ++index)
+        output_generations[index] = output_channels_[index].input_generation.load(std::memory_order_acquire);
     RuntimeProfiler::Scope profile_scope(profiler_, RuntimeProfiler::Callback::input);
     pw_buffer* buffer = pw_stream_dequeue_buffer(stream.sink);
     if (buffer == nullptr) {
@@ -63,26 +66,22 @@ void PipeWireEngine::stream_input_process(PlaybackStream& stream)
             for (std::size_t output_index = 0; output_index < output_channels_.size(); ++output_index) {
                 if ((mask & (1U << output_index)) == 0) continue;
                 OutputChannel& output = output_channels_[output_index];
-                std::uint32_t users = output.input_users.load(std::memory_order_acquire);
-                bool output_acquired = false;
-                while ((users & kMixerClosed) == 0) {
-                    if (output.input_users.compare_exchange_weak(users, users + 1,
-                            std::memory_order_acquire, std::memory_order_relaxed)) {
-                        output_acquired = true;
-                        break;
-                    }
-                }
-                if (!output_acquired) continue;
+                RealtimeAccessGate::Guard output_guard(output.input_gate);
+                if (!output_guard) continue;
+                if (output.input_generation.load(std::memory_order_acquire) != output_generations[output_index])
+                    continue;
+                const auto current_app_mask = app_channels_[stream.channel_index].output_mask.load(std::memory_order_acquire);
+                const auto current_stream_mask = stream.output_mask.load(std::memory_order_acquire);
+                if (((current_app_mask | current_stream_mask) & (1U << output_index)) == 0) continue;
                 if (output.linked.load(std::memory_order_acquire)) {
-                    if ((app_mask & (1U << output_index)) != 0) {
+                    if ((current_app_mask & (1U << output_index)) != 0) {
                         written = std::min(written, stream.audio[output_index].write_with_gain_ramp(
                             samples, frames, stream.smoothed_gain, increment));
                     }
-                    if ((stream_mask & (1U << output_index)) != 0) {
+                    if ((current_stream_mask & (1U << output_index)) != 0) {
                         written = std::min(written, stream.send_audio[output_index].write(samples, frames));
                     }
                 }
-                output.input_users.fetch_sub(1, std::memory_order_release);
             }
             profile_scope.set_frames(frames, kSampleRate);
             if (mask != 0) profile_scope.record_input_overrun(frames - written);
@@ -94,6 +93,11 @@ void PipeWireEngine::stream_input_process(PlaybackStream& stream)
 
 void PipeWireEngine::capture_source_process()
 {
+    RealtimeAccessGate::Guard process_guard(capture_channel_.process_gate);
+    if (!process_guard) return;
+    std::array<std::uint32_t, max_output_channels> output_generations{};
+    for (std::size_t index = 0; index < output_generations.size(); ++index)
+        output_generations[index] = output_channels_[index].input_generation.load(std::memory_order_acquire);
     RuntimeProfiler::Scope profile_scope(profiler_, RuntimeProfiler::Callback::input);
     pw_buffer* buffer = pw_stream_dequeue_buffer(capture_channel_.source_stream);
     if (buffer == nullptr) return;
@@ -113,20 +117,13 @@ void PipeWireEngine::capture_source_process()
             for (std::size_t output_index = 0; output_index < output_channels_.size(); ++output_index) {
                 if ((mask & (1U << output_index)) == 0) continue;
                 OutputChannel& output = output_channels_[output_index];
-                std::uint32_t users = output.input_users.load(std::memory_order_acquire);
-                bool output_acquired = false;
-                while ((users & kMixerClosed) == 0) {
-                    if (output.input_users.compare_exchange_weak(users, users + 1,
-                            std::memory_order_acquire, std::memory_order_relaxed)) {
-                        output_acquired = true;
-                        break;
-                    }
-                }
-                if (!output_acquired) continue;
-                if (output.linked.load(std::memory_order_acquire))
+                RealtimeAccessGate::Guard output_guard(output.input_gate);
+                if (!output_guard) continue;
+                if (output.input_generation.load(std::memory_order_acquire) == output_generations[output_index] &&
+                    (capture_channel_.output_mask.load(std::memory_order_acquire) & (1U << output_index)) != 0 &&
+                    output.linked.load(std::memory_order_acquire))
                     capture_channel_.audio[output_index].write_with_gain_ramp(samples, frames,
                         capture_channel_.smoothed_gain, increment);
-                output.input_users.fetch_sub(1, std::memory_order_release);
             }
             capture_channel_.smoothed_gain = target;
             profile_scope.set_frames(frames, kSampleRate);
@@ -137,23 +134,11 @@ void PipeWireEngine::capture_source_process()
 
 void PipeWireEngine::output_process(OutputChannel& output)
 {
+    RealtimeAccessGate::Guard process_guard(output.process_gate);
+    if (!process_guard) return;
     RuntimeProfiler::Scope profile_scope(profiler_, RuntimeProfiler::Callback::output);
     pw_buffer* buffer = pw_stream_dequeue_buffer(output.stream);
     if (buffer == nullptr) return;
-
-    std::uint32_t users = output.mixer_users.load(std::memory_order_acquire);
-    bool acquired = false;
-    while ((users & kMixerClosed) == 0) {
-        if (output.mixer_users.compare_exchange_weak(users, users + 1,
-                std::memory_order_acquire, std::memory_order_relaxed)) {
-            acquired = true;
-            break;
-        }
-    }
-    if (!acquired) {
-        pw_stream_queue_buffer(output.stream, buffer);
-        return;
-    }
 
     if (buffer->buffer != nullptr && buffer->buffer->n_datas > 0) {
         spa_data& data = buffer->buffer->datas[0];
@@ -190,26 +175,14 @@ void PipeWireEngine::output_process(OutputChannel& output)
                     for (std::size_t stream_index = 0; stream_index < stream_count; ++stream_index) {
                         PlaybackStream& stream = playback_streams_[stream_index];
                         if (!stream.active.load(std::memory_order_acquire) || stream.channel_index != channel_index) continue;
-                        std::uint32_t stream_users = stream.mixer_users.load(std::memory_order_acquire);
-                        bool stream_acquired = false;
-                        while ((stream_users & kMixerClosed) == 0) {
-                            if (stream.mixer_users.compare_exchange_weak(stream_users, stream_users + 1,
-                                    std::memory_order_acquire, std::memory_order_relaxed)) {
-                                stream_acquired = true;
-                                break;
-                            }
-                        }
-                        if (!stream_acquired || !stream.active.load(std::memory_order_acquire)) {
-                            if (stream_acquired) stream.mixer_users.fetch_sub(1, std::memory_order_release);
-                            continue;
-                        }
+                        RealtimeAccessGate::Guard stream_guard(stream.mixer_gate);
+                        if (!stream_guard || !stream.active.load(std::memory_order_acquire)) continue;
                         auto& ring = stream.audio[output_index];
                         const auto occupancy = ring.available_frames();
                         profile_scope.record_ring_occupancy(occupancy);
                         profile_scope.record_app_stream_ring_occupancy(occupancy);
                         const auto consumed = ring.accumulate(channel_mix.data(), block_frames, 1.0F);
                         profile_scope.record_unfilled_mix_frames(block_frames - consumed);
-                        stream.mixer_users.fetch_sub(1, std::memory_order_release);
                     }
                     const float target = channel.muted.load(std::memory_order_relaxed)
                         ? 0.0F : channel.target_gain.load(std::memory_order_relaxed);
@@ -226,16 +199,8 @@ void PipeWireEngine::output_process(OutputChannel& output)
                         PlaybackStream& stream = playback_streams_[stream_index];
                         if (!stream.active.load(std::memory_order_acquire) || stream.channel_index != channel_index ||
                             (stream.output_mask.load(std::memory_order_acquire) & output_bit) == 0) continue;
-                        std::uint32_t stream_users = stream.mixer_users.load(std::memory_order_acquire);
-                        bool stream_acquired = false;
-                        while ((stream_users & kMixerClosed) == 0) {
-                            if (stream.mixer_users.compare_exchange_weak(stream_users, stream_users + 1,
-                                    std::memory_order_acquire, std::memory_order_relaxed)) {
-                                stream_acquired = true;
-                                break;
-                            }
-                        }
-                        if (!stream_acquired) continue;
+                        RealtimeAccessGate::Guard stream_guard(stream.mixer_gate);
+                        if (!stream_guard) continue;
                         auto& ring = stream.send_audio[output_index];
                         profile_scope.record_app_stream_ring_occupancy(ring.available_frames());
                         const auto consumed = ring.read(channel_mix.data(), block_frames);
@@ -249,21 +214,12 @@ void PipeWireEngine::output_process(OutputChannel& output)
                             block_frames, kChannels, {gain, increment},
                             {stream_gain, stream_increment});
                         stream.smoothed_send_gain[output_index] = stream_target;
-                        stream.mixer_users.fetch_sub(1, std::memory_order_release);
                     }
                 }
 
                 std::fill(channel_mix.begin(), channel_mix.begin() + block_frames * kChannels, 0.0F);
-                std::uint32_t capture_users = capture_channel_.mixer_users.load(std::memory_order_acquire);
-                bool capture_acquired = false;
-                while ((capture_users & kMixerClosed) == 0) {
-                    if (capture_channel_.mixer_users.compare_exchange_weak(capture_users, capture_users + 1,
-                            std::memory_order_acquire, std::memory_order_relaxed)) {
-                        capture_acquired = true;
-                        break;
-                    }
-                }
-                if (capture_acquired) {
+                RealtimeAccessGate::Guard capture_guard(capture_channel_.mixer_gate);
+                if (capture_guard) {
                     auto& ring = capture_channel_.audio[output_index];
                     const auto consumed = ring.read(channel_mix.data(), block_frames);
                     profile_scope.record_ring_occupancy(ring.available_frames());
@@ -272,7 +228,6 @@ void PipeWireEngine::output_process(OutputChannel& output)
                         dsp::accumulate_ramp(samples + output_offset, channel_mix.data(),
                                              block_frames, kChannels, {1.0F, 0.0F});
                     }
-                    capture_channel_.mixer_users.fetch_sub(1, std::memory_order_release);
                 }
             }
 
@@ -295,7 +250,6 @@ void PipeWireEngine::output_process(OutputChannel& output)
             data.chunk->size = frames * sizeof(float) * kChannels;
         }
     }
-    output.mixer_users.fetch_sub(1, std::memory_order_release);
     pw_stream_queue_buffer(output.stream, buffer);
 }
 

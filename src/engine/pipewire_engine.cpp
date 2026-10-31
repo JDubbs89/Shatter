@@ -1,4 +1,4 @@
-#include "shatter/engine/pipewire_engine.hpp"
+#include "pipewire_engine.hpp"
 #include "shatter/engine/identifiers.hpp"
 
 #include <pipewire/keys.h>
@@ -31,8 +31,6 @@ constexpr std::uint32_t kChannels = 2;
 constexpr float kMinimumGainDb = -60.0F;
 constexpr float kMaximumGainDb = 12.0F;
 constexpr std::size_t kFaderTrackWidth = 25;
-constexpr std::uint32_t kMixerClosed = 1U << 31U;
-constexpr std::uint32_t kMixerUserMask = kMixerClosed - 1U;
 
 spa_pod* build_stereo_format(spa_pod_builder* builder)
 {
@@ -992,7 +990,6 @@ bool PipeWireEngine::replace_capture_source(std::string_view source_selector, st
     }
     destroy_capture_stream();
     capture_channel_.output_mask.store(0, std::memory_order_release);
-    for (auto& ring : capture_channel_.audio) ring.discard_all();
     capture_channel_.smoothed_gain = capture_channel_.target_gain.load(std::memory_order_relaxed);
 
     pw_properties* properties = pw_properties_new(
@@ -1035,17 +1032,19 @@ bool PipeWireEngine::replace_capture_source(std::string_view source_selector, st
 void PipeWireEngine::destroy_capture_stream()
 {
     capture_channel_.active.store(false, std::memory_order_release);
-    capture_channel_.mixer_users.fetch_or(kMixerClosed, std::memory_order_acq_rel);
+    capture_channel_.process_gate.close();
+    capture_channel_.mixer_gate.close();
     if (capture_channel_.source_stream != nullptr) {
         pw_stream_disconnect(capture_channel_.source_stream);
+        capture_channel_.process_gate.wait_for_quiescence();
         pw_stream_destroy(capture_channel_.source_stream);
         capture_channel_.source_stream = nullptr;
     }
-    while ((capture_channel_.mixer_users.load(std::memory_order_acquire) & kMixerUserMask) != 0) {
-        std::this_thread::yield();
-    }
+    capture_channel_.process_gate.wait_for_quiescence();
+    capture_channel_.mixer_gate.wait_for_quiescence();
     for (auto& ring : capture_channel_.audio) ring.discard_all();
-    capture_channel_.mixer_users.store(0, std::memory_order_release);
+    capture_channel_.process_gate.reopen();
+    capture_channel_.mixer_gate.reopen();
     {
         std::lock_guard lock(nodes_mutex_);
         capture_channel_.source_node_id = PW_ID_ANY;
@@ -1203,12 +1202,19 @@ void PipeWireEngine::cleanup()
     }
     destroy_capture_stream();
     for (auto& stream : playback_streams_) {
+        stream.active.store(false, std::memory_order_release);
+        stream.process_gate.close();
+        stream.mixer_gate.close();
         if (stream.sink != nullptr) {
             pw_stream_disconnect(stream.sink);
+            stream.process_gate.wait_for_quiescence();
             pw_stream_destroy(stream.sink);
             stream.sink = nullptr;
         }
-        stream.active.store(false, std::memory_order_relaxed);
+        stream.process_gate.wait_for_quiescence();
+        stream.mixer_gate.wait_for_quiescence();
+        for (auto& ring : stream.audio) ring.discard_all();
+        for (auto& ring : stream.send_audio) ring.discard_all();
     }
     for (std::size_t index = 0; index < output_channels_.size(); ++index) {
         auto& output = output_channels_[index];

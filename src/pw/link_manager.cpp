@@ -1,4 +1,4 @@
-#include "shatter/engine/pipewire_engine.hpp"
+#include "pipewire_engine.hpp"
 #include "shatter/engine/identifiers.hpp"
 
 #include <pipewire/keys.h>
@@ -22,8 +22,6 @@ namespace shatter::engine {
 
 namespace {
 constexpr char kSpeakerStreamName[] = "shatter.speakers";
-constexpr std::uint32_t kMixerClosed = 1U << 31U;
-constexpr std::uint32_t kMixerUserMask = kMixerClosed - 1U;
 
 void trace_output(const char* stage, const void* request, std::string_view detail = {})
 {
@@ -259,12 +257,12 @@ bool PipeWireEngine::make_output_at_locked(std::string name, std::size_t slot, s
         const std::size_t index = slot;
         OutputChannel& output = output_channels_[index];
         if (output.in_use) { error = "configuration output slot is already in use"; return false; }
+        output.input_generation.fetch_add(1, std::memory_order_acq_rel);
         output.engine = this;
         output.in_use = true;
         output.target_gain.store(1.0F, std::memory_order_relaxed);
         output.muted.store(false, std::memory_order_relaxed);
         output.smoothed_gain = 1.0F;
-        output.input_users.store(0, std::memory_order_release);
         output.assigned_sink_count = 0;
         for (auto& assigned_name : output.assigned_sink_names) assigned_name.clear();
         for (auto& identity : output.assigned_sink_identities) identity.clear();
@@ -471,6 +469,7 @@ bool PipeWireEngine::delete_output_locked(std::string_view selector, std::string
     if (output == &output_channels_[0]) { error = "the built-in speakers output cannot be deleted"; return false; }
     const auto index = static_cast<std::size_t>(output - output_channels_.data());
     const std::uint32_t bit = 1U << index;
+    output->input_generation.fetch_add(1, std::memory_order_acq_rel);
     for (std::size_t i = 0; i < allocated_channels_.load(std::memory_order_relaxed); ++i)
         app_channels_[i].output_mask.fetch_and(~bit, std::memory_order_release);
     capture_channel_.output_mask.fetch_and(~bit, std::memory_order_release);

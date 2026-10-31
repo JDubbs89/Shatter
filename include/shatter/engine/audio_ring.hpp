@@ -9,7 +9,13 @@
 
 namespace shatter::engine {
 
+// Preallocated stereo SPSC ring. Construct it before real-time use; exactly one
+// producer may call write* and exactly one consumer may call read/accumulate.
+// discard_all is a control-thread operation and requires both sides quiescent.
 class AudioRingBuffer {
+    static_assert(std::atomic<std::uint64_t>::is_always_lock_free,
+                  "audio ring cursors require lock-free 64-bit atomics");
+
 public:
     static constexpr std::size_t capacity_frames = 8192;
 

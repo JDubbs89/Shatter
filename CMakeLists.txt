@@ -115,6 +115,7 @@ if(SHATTER_PLATFORM STREQUAL "WINDOWS")
 endif()
 
 target_include_directories(shatter PRIVATE include)
+target_include_directories(shatter PRIVATE src/engine)
 target_compile_features(shatter PRIVATE cxx_std_20)
 target_link_libraries(shatter PRIVATE shatter_platform)
 if(SHATTER_AUDIO_BACKEND STREQUAL "PIPEWIRE")

@@ -1,4 +1,4 @@
-#include "shatter/engine/pipewire_engine.hpp"
+#include "pipewire_engine.hpp"
 
 #include <pipewire/keys.h>
 #include <pipewire/port.h>
@@ -11,8 +11,6 @@
 
 namespace shatter::engine {
 namespace {
-constexpr std::uint32_t kMixerClosed = 1U << 31U;
-constexpr std::uint32_t kMixerUserMask = kMixerClosed - 1U;
 constexpr char kSpeakerStreamName[] = "shatter.speakers";
 }
 
@@ -162,7 +160,8 @@ void PipeWireEngine::on_global_remove(void* data, std::uint32_t id)
             };
             removed->active.store(false, std::memory_order_release);
             removed->in_use = false;
-            removed->mixer_users.fetch_or(kMixerClosed, std::memory_order_acq_rel);
+            removed->process_gate.close();
+            removed->mixer_gate.close();
             engine.stream_by_node_.erase(stream);
         }
         engine.nodes_.erase(id);
@@ -184,13 +183,14 @@ void PipeWireEngine::on_global_remove(void* data, std::uint32_t id)
     if (removed != nullptr) {
         if (removed->sink != nullptr) {
             pw_stream_disconnect(removed->sink);
+            removed->process_gate.wait_for_quiescence();
             pw_stream_destroy(removed->sink);
             removed->sink = nullptr;
         }
-        while ((removed->mixer_users.load(std::memory_order_acquire) & kMixerUserMask) != 0) {
-            std::this_thread::yield();
-        }
+        removed->process_gate.wait_for_quiescence();
+        removed->mixer_gate.wait_for_quiescence();
         for (auto& ring : removed->audio) ring.discard_all();
+        for (auto& ring : removed->send_audio) ring.discard_all();
         std::lock_guard lock(engine.nodes_mutex_);
         removed->name.clear();
         removed->original_name.clear();
@@ -198,7 +198,8 @@ void PipeWireEngine::on_global_remove(void* data, std::uint32_t id)
         removed->sink_name.clear();
         removed->node_id = PW_ID_ANY;
         removed->in_use = false;
-        removed->mixer_users.store(0, std::memory_order_release);
+        removed->process_gate.reopen();
+        removed->mixer_gate.reopen();
     }
     engine.state_changed_.notify_all();
 }

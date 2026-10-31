@@ -2,6 +2,7 @@
 
 #include "shatter/engine/audio_backend.hpp"
 #include "shatter/engine/audio_ring.hpp"
+#include "shatter/engine/realtime_access_gate.hpp"
 #include "shatter/engine/runtime_profiler.hpp"
 #include "shatter/state/store.hpp"
 
@@ -95,7 +96,8 @@ private:
         PipeWireEngine* engine = nullptr;
         bool in_use = false;
         std::atomic<bool> active{false};
-        std::atomic<std::uint32_t> mixer_users{0};
+        RealtimeAccessGate process_gate;
+        RealtimeAccessGate mixer_gate;
         std::uint32_t node_id = PW_ID_ANY;
         std::size_t channel_index = 0;
         std::string name;
@@ -128,7 +130,8 @@ private:
         pw_stream_events events{};
         std::uint32_t source_node_id = PW_ID_ANY;
         std::atomic<bool> active{false};
-        std::atomic<std::uint32_t> mixer_users{0};
+        RealtimeAccessGate process_gate;
+        RealtimeAccessGate mixer_gate;
         std::atomic<float> target_gain{1.0F};
         std::atomic<bool> muted{false};
         std::atomic<std::uint32_t> output_mask{0};
@@ -141,8 +144,9 @@ private:
         bool in_use = false;
         std::atomic<bool> active{false};
         std::atomic<bool> linked{false};
-        std::atomic<std::uint32_t> mixer_users{0};
-        std::atomic<std::uint32_t> input_users{0};
+        std::atomic<std::uint32_t> input_generation{0};
+        RealtimeAccessGate process_gate;
+        RealtimeAccessGate input_gate;
         std::string name;
         std::string node_name;
         std::atomic<float> target_gain{1.0F};
