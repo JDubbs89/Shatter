@@ -332,6 +332,8 @@ bool PipeWireEngine::apply_config_locked(state::Show show, std::string& error)
                 output.assigned_sink_names[i] = saved.devices[i].name;
                 output.assigned_sink_identities[i] = saved.devices[i].identity;
             }
+            output.target_gain.store(std::pow(10.0F, saved.gain_db / 20.0F), std::memory_order_relaxed);
+            output.muted.store(saved.muted, std::memory_order_relaxed);
         }
         for (std::size_t index = 0; index < allocated_channels_.load(); ++index) {
             auto& app = app_channels_[index];
@@ -368,6 +370,9 @@ bool PipeWireEngine::apply_config_locked(state::Show show, std::string& error)
         capture_channel_.output_mask.store(loaded_show_.has_capture_sends
             ? output_mask_for_identities(loaded_show_.capture_output_identities) : 0U,
             std::memory_order_release);
+        capture_channel_.target_gain.store(std::pow(10.0F, loaded_show_.capture_gain_db / 20.0F),
+                                           std::memory_order_relaxed);
+        capture_channel_.muted.store(loaded_show_.capture_muted, std::memory_order_release);
     }
     if (!loaded_show_.capture_source_identity.empty()) {
         std::string selector;
@@ -428,7 +433,7 @@ void PipeWireEngine::restore_output_routes_locked(OutputChannel& output)
             const std::string identity = stable_device_identity(sink.device_identity, sink_name);
             const bool same_identity = !pending[index].identity.empty() &&
                 (pending[index].identity == sink.device_identity || pending[index].identity == identity);
-            const bool fallback_name = pending[index].name == sink_name;
+            const bool fallback_name = pending[index].identity.empty() && pending[index].name == sink_name;
             if (!same_identity && !fallback_name) continue;
             if (match != nullptr) { match = nullptr; break; }
             match = &sink;

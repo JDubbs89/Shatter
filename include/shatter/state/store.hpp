@@ -37,6 +37,8 @@ struct OutputSetting {
     std::string identity;
     std::string name;
     std::vector<DeviceBinding> devices;
+    float gain_db = 0.0F;
+    bool muted = false;
 };
 
 struct Show {
@@ -46,6 +48,8 @@ struct Show {
     std::vector<std::string> capture_output_identities;
     bool has_capture_sends = false;
     std::string capture_source_identity;
+    float capture_gain_db = 0.0F;
+    bool capture_muted = false;
 };
 
 class Store {

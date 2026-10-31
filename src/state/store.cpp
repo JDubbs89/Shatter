@@ -15,7 +15,8 @@ namespace {
 
 constexpr std::string_view kHeaderV1 = "SHATTER-CONFIG 1";
 constexpr std::string_view kHeaderV2 = "SHATTER-CONFIG 2";
-constexpr std::string_view kHeader = "SHATTER-CONFIG 3";
+constexpr std::string_view kHeaderV3 = "SHATTER-CONFIG 3";
+constexpr std::string_view kHeader = "SHATTER-CONFIG 4";
 constexpr float kMinimumGainDb = -60.0F;
 constexpr float kMaximumGainDb = 12.0F;
 
@@ -143,12 +144,13 @@ bool Store::load(std::string_view name, Show& show, std::string& error) const
         }
         std::string header;
         if (!std::getline(file, header) ||
-            (header != kHeader && header != kHeaderV2 && header != kHeaderV1)) {
+            (header != kHeader && header != kHeaderV3 && header != kHeaderV2 && header != kHeaderV1)) {
             error = "unsupported or invalid configuration format";
             return false;
         }
-        const bool version_two = header == kHeaderV2 || header == kHeader;
-        const bool version_three = header == kHeader;
+        const bool version_two = header == kHeaderV2 || header == kHeaderV3 || header == kHeader;
+        const bool version_three = header == kHeaderV3 || header == kHeader;
+        const bool version_four = header == kHeader;
 
         Show loaded;
         std::map<std::string, std::size_t> outputs_by_identity;
@@ -210,6 +212,14 @@ bool Store::load(std::string_view name, Show& show, std::string& error) const
                     error = "invalid or duplicate output entry in configuration";
                     return false;
                 }
+                if (version_four) {
+                    if (!(row >> item.gain_db >> muted) || !valid_gain(item.gain_db) ||
+                        (muted != 0 && muted != 1)) {
+                        error = "invalid output channel controls in configuration";
+                        return false;
+                    }
+                    item.muted = muted != 0;
+                }
                 outputs_by_identity[item.identity] = loaded.outputs.size();
                 loaded.outputs.push_back(std::move(item));
             } else if ((type == 'B' && header == kHeaderV2) || (type == 'D' && version_three)) {
@@ -229,6 +239,14 @@ bool Store::load(std::string_view name, Show& show, std::string& error) const
             } else if (type == 'C' && version_two) {
                 if (loaded.has_capture_sends) { error = "duplicate capture entry in configuration"; return false; }
                 std::size_t send_count = 0;
+                if (version_four) {
+                    if (!(row >> loaded.capture_gain_db >> muted) || !valid_gain(loaded.capture_gain_db) ||
+                        (muted != 0 && muted != 1)) {
+                        error = "invalid capture channel controls in configuration";
+                        return false;
+                    }
+                    loaded.capture_muted = muted != 0;
+                }
                 if (!(row >> send_count)) { error = "invalid capture send list in configuration"; return false; }
                 loaded.has_capture_sends = true;
                 for (std::size_t i = 0; i < send_count; ++i) {
@@ -282,8 +300,9 @@ bool Store::save(std::string_view name, const Show& show, std::string& error) co
                 error = "output identity or name is invalid or duplicated";
                 return false;
             }
+            if (!valid_gain(output.gain_db)) { error = "output gain is outside the supported range"; return false; }
             file << "O " << output.slot << ' ' << std::quoted(output.identity) << ' '
-                 << std::quoted(output.name) << '\n';
+                 << std::quoted(output.name) << ' ' << output.gain_db << ' ' << (output.muted ? 1 : 0) << '\n';
             for (const auto& device : output.devices) {
                 if (device.name.empty()) { error = "output device name cannot be empty"; return false; }
                 file << "D " << std::quoted(output.identity) << ' ' << std::quoted(device.identity)
@@ -311,7 +330,9 @@ bool Store::save(std::string_view name, const Show& show, std::string& error) co
             for (const auto& identity : stream.output_identities) file << ' ' << std::quoted(identity);
             file << '\n';
         }
-        file << "C " << show.capture_output_identities.size();
+        if (!valid_gain(show.capture_gain_db)) { error = "capture gain is outside the supported range"; return false; }
+        file << "C " << show.capture_gain_db << ' ' << (show.capture_muted ? 1 : 0) << ' '
+             << show.capture_output_identities.size();
         for (const auto& identity : show.capture_output_identities) file << ' ' << std::quoted(identity);
         file << '\n';
         if (!show.capture_source_identity.empty())

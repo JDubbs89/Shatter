@@ -533,6 +533,8 @@ bool PipeWireEngine::save_config(std::string_view name, std::string& error)
         }
         show.capture_output_identities = identities_for_mask(
             capture_channel_.output_mask.load(std::memory_order_relaxed));
+        show.capture_gain_db = gain_db(capture_channel_.target_gain.load(std::memory_order_relaxed));
+        show.capture_muted = capture_channel_.muted.load(std::memory_order_relaxed);
         if (capture_channel_.source_node_id != PW_ID_ANY) {
             const auto source = nodes_.find(capture_channel_.source_node_id);
             if (source != nodes_.end()) {
@@ -549,6 +551,8 @@ bool PipeWireEngine::save_config(std::string_view name, std::string& error)
             setting.slot = i;
             setting.identity = output.node_name;
             setting.name = output.name;
+            setting.gain_db = gain_db(output.target_gain.load(std::memory_order_relaxed));
+            setting.muted = output.muted.load(std::memory_order_relaxed);
             for (std::size_t sink = 0; sink < output.assigned_sink_count; ++sink) {
                 if (output.assigned_sink_names[sink].empty()) continue;
                 setting.devices.push_back({stable_device_identity(

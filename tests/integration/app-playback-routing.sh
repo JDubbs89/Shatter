@@ -438,7 +438,7 @@ grep -F 'D "shatter.output.1" "device:shatter-test-headphones-path" "shatter-tes
 }
 "$binary" delete out "Headphone Monitor"
 cp "$config_file" "$test_root/routes.conf"
-sed 's/"device:shatter-test-headphones-path" "shatter-test-headphones"/"device:missing-device" "missing-device"/' \
+sed 's/"device:shatter-test-headphones-path"/"device:missing-device"/' \
     "$test_root/routes.conf" >"$config_file"
 "$binary" load show routes
 output_listing=$("$binary" list out)
