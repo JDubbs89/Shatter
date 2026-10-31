@@ -1,5 +1,5 @@
 #include "shatter/api/server.hpp"
-#include "shatter/engine/pipewire_engine.hpp"
+#include "shatter/engine/audio_backend.hpp"
 
 #include <array>
 #include <cerrno>
@@ -151,7 +151,8 @@ int run_server()
         }
     }
 
-    shatter::engine::PipeWireEngine audio_engine;
+    auto audio_backend = shatter::engine::create_audio_backend();
+    auto& audio_engine = *audio_backend;
     std::string audio_error;
     audio_engine.start(audio_error);
     std::string startup_show = "default";
@@ -319,7 +320,8 @@ int run_server()
                 std::istringstream parsed{std::string(input)};
                 std::string action, output, sink, extra, output_error;
                 if (!(parsed >> action >> std::quoted(output) >> std::quoted(sink)) || (parsed >> extra)) reply = "ERR expected OUTPUT-SINK <output> <sink>\n";
-                else if (audio_engine.assign_output_sink(output, sink, action == "OUTPUT-SINK-ASSIGN", output_error))
+                else if (audio_engine.assign_output_destination(output, sink,
+                             action == "OUTPUT-SINK-ASSIGN", output_error))
                     reply = std::string("OK output sink ") + (action == "OUTPUT-SINK-ASSIGN" ? "assigned\n" : "unassigned\n");
                 else reply = "ERR " + output_error + "\n";
             } else if (input.starts_with("APP-OUTPUT-")) {
@@ -340,12 +342,8 @@ int run_server()
                 else reply = "ERR " + output_error + "\n";
             } else if (input.starts_with("CAPTURE-SOURCE ")) {
                 std::string value(input.substr(std::string_view("CAPTURE-SOURCE ").size()));
-                std::uint32_t source_id = PW_ID_ANY;
-                const auto [end, parse_error] = std::from_chars(value.data(), value.data() + value.size(), source_id);
                 std::string capture_error;
-                if (parse_error != std::errc{} || end != value.data() + value.size()) {
-                    reply = "ERR capture source id must be a PipeWire node id\n";
-                } else if (audio_engine.set_capture_source(source_id, capture_error)) {
+                if (audio_engine.set_capture_source(value, capture_error)) {
                     reply = "OK capture source set to " + value + "; speaker send off\n";
                 } else {
                     reply = "ERR " + capture_error + "\n";

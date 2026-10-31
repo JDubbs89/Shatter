@@ -1,5 +1,6 @@
 #pragma once
 
+#include "shatter/engine/audio_backend.hpp"
 #include "shatter/engine/audio_ring.hpp"
 #include "shatter/engine/runtime_profiler.hpp"
 #include "shatter/state/store.hpp"
@@ -23,55 +24,58 @@
 
 namespace shatter::engine {
 
-class PipeWireEngine {
+class PipeWireEngine final : public AudioBackend {
 public:
     static constexpr std::size_t max_app_channels = 1024;
     static constexpr std::size_t max_playback_streams = 128;
     static constexpr std::size_t max_output_channels = 8;
 
     PipeWireEngine() = default;
-    ~PipeWireEngine();
+    ~PipeWireEngine() override;
 
     PipeWireEngine(const PipeWireEngine&) = delete;
     PipeWireEngine& operator=(const PipeWireEngine&) = delete;
 
-    bool start(std::string& error);
-    void stop();
-    bool set_app_gain_db(std::string_view channel_id, float decibels, std::string& error);
-    bool set_stream_gain_db(std::string_view stream_selector, float decibels, std::string& error);
-    bool set_app_muted(std::string_view channel_id, bool muted, std::string& error);
-    bool set_stream_muted(std::string_view stream_selector, bool muted, std::string& error);
-    bool rename_app(std::string_view current_name, std::string new_name, std::string& error);
-    bool rename_stream(std::string_view current_name, std::string new_name, std::string& error);
-    bool set_capture_source(std::uint32_t source_node_id, std::string& error);
-    bool set_capture_gain_db(float decibels, std::string& error);
-    bool set_capture_muted(bool muted, std::string& error);
+    bool start(std::string& error) override;
+    void stop() override;
+    bool set_app_gain_db(std::string_view channel_id, float decibels, std::string& error) override;
+    bool set_stream_gain_db(std::string_view stream_selector, float decibels, std::string& error) override;
+    bool set_app_muted(std::string_view channel_id, bool muted, std::string& error) override;
+    bool set_stream_muted(std::string_view stream_selector, bool muted, std::string& error) override;
+    bool rename_app(std::string_view current_name, std::string new_name, std::string& error) override;
+    bool rename_stream(std::string_view current_name, std::string new_name, std::string& error) override;
+    bool set_capture_source(std::string_view source_selector, std::string& error) override;
+    bool set_capture_gain_db(float decibels, std::string& error) override;
+    bool set_capture_muted(bool muted, std::string& error) override;
     bool set_fader_db(std::string_view scope, std::string_view selector, float decibels,
-                      bool minimum, std::string& error);
+                      bool minimum, std::string& error) override;
     bool adjust_fader_db(std::string_view scope, std::string_view selector, float delta_db,
-                         bool minimum, std::string& error);
-    bool set_capture_speaker_send(bool enabled, std::string& error);
-    bool set_output_gain_db(std::string_view output_selector, float decibels, std::string& error);
-    bool set_output_muted(std::string_view output_selector, bool muted, std::string& error);
-    bool make_output(std::string name, std::string& error);
-    bool delete_output(std::string_view selector, std::string& error);
-    bool assign_output_sink(std::string_view output_selector, std::string_view sink_selector, bool assigned,
-                            std::string& error);
+                         bool minimum, std::string& error) override;
+    bool set_capture_speaker_send(bool enabled, std::string& error) override;
+    bool set_output_gain_db(std::string_view output_selector, float decibels,
+                            std::string& error) override;
+    bool set_output_muted(std::string_view output_selector, bool muted, std::string& error) override;
+    bool make_output(std::string name, std::string& error) override;
+    bool delete_output(std::string_view selector, std::string& error) override;
+    bool assign_output_destination(std::string_view output_selector,
+                                   std::string_view destination_selector,
+                                   bool assigned, std::string& error) override;
     bool assign_app_output(std::string_view app_selector, std::string_view output_selector, bool assigned,
-                           std::string& error);
+                           std::string& error) override;
     bool assign_input_output(std::string_view scope, std::string_view input_selector,
-                             std::string_view output_selector, bool assigned, std::string& error);
-    bool load_config(std::string_view name, std::string& error);
-    bool save_config(std::string_view name, std::string& error);
-    bool load_default_config(std::string& name, std::string& error);
-    std::string list_inputs(std::size_t terminal_width = 100) const;
-    std::string list_outputs(std::size_t terminal_width = 100) const;
-    std::string fader_status() const;
-    bool profile_start(std::string& error);
-    std::string profile_stop(std::string& error);
-    bool available() const noexcept;
-    void begin_shutdown_fade() noexcept;
-    void pause_streams_for_shutdown() noexcept;
+                             std::string_view output_selector, bool assigned,
+                             std::string& error) override;
+    bool load_config(std::string_view name, std::string& error) override;
+    bool save_config(std::string_view name, std::string& error) override;
+    bool load_default_config(std::string& name, std::string& error) override;
+    std::string list_inputs(std::size_t terminal_width = 100) const override;
+    std::string list_outputs(std::size_t terminal_width = 100) const override;
+    std::string fader_status() const override;
+    bool profile_start(std::string& error) override;
+    std::string profile_stop(std::string& error) override;
+    bool available() const noexcept override;
+    void begin_shutdown_fade() noexcept override;
+    void pause_streams_for_shutdown() noexcept override;
 
 private:
     enum class FaderUpdateMode { absolute, relative, minimum };

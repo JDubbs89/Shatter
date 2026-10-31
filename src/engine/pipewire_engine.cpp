@@ -310,8 +310,15 @@ bool PipeWireEngine::rename_stream(std::string_view current_name, std::string ne
     return true;
 }
 
-bool PipeWireEngine::set_capture_source(std::uint32_t source_node_id, std::string& error)
+bool PipeWireEngine::set_capture_source(std::string_view source_selector, std::string& error)
 {
+    std::uint32_t source_node_id = PW_ID_ANY;
+    const auto [end, parse_error] = std::from_chars(
+        source_selector.data(), source_selector.data() + source_selector.size(), source_node_id);
+    if (parse_error != std::errc{} || end != source_selector.data() + source_selector.size()) {
+        error = "capture source selector must be an unsigned integer";
+        return false;
+    }
     if (main_loop_ == nullptr) {
         error = "PipeWire engine is not running";
         return false;

@@ -35,6 +35,7 @@ add_executable(shatter
     src/engine/fx_host.cpp
     src/engine/mixer_node.cpp
     src/engine/pipewire_engine.cpp
+    src/engine/audio_backend.cpp
     src/meter/meter_bus.cpp
     src/pw/core.cpp
     src/pw/link_manager.cpp

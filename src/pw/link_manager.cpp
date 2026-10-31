@@ -78,14 +78,15 @@ bool PipeWireEngine::delete_output(std::string_view selector, std::string& error
     return invoke_output_request(request, error);
 }
 
-bool PipeWireEngine::assign_output_sink(std::string_view output_selector, std::string_view sink_selector,
-                                        bool assigned, std::string& error)
+bool PipeWireEngine::assign_output_destination(std::string_view output_selector,
+                                               std::string_view destination_selector,
+                                               bool assigned, std::string& error)
 {
     OutputRequest request{};
     request.engine = this;
     request.action = OutputRequest::Action::assign_sink;
     request.first = std::string(output_selector);
-    request.second = std::string(sink_selector);
+    request.second = std::string(destination_selector);
     request.assigned = assigned;
     return invoke_output_request(request, error);
 }
