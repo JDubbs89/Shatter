@@ -1,3 +1,5 @@
 # Unit tests
 
-Planned coverage for domain-independent logic such as rule matching, mixer-state validation, command handling, and DSP primitives. Add a test framework when the first test is introduced; the design spec currently considers Catch2.
+Unit tests use GoogleTest assertions and GoogleMock support. Install the system
+GoogleTest development package (`gtest-devel` and `gmock-devel` on Fedora) before
+configuring with `BUILD_TESTING=ON`.

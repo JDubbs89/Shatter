@@ -1,5 +1,7 @@
 #include "shatter/platform/platform.hpp"
 
+#include <gtest/gtest.h>
+
 #include <chrono>
 #include <filesystem>
 #include <iostream>
@@ -11,7 +13,7 @@
 #include <sys/stat.h>
 #endif
 
-int main()
+TEST(PlatformControlTest, ControlTransportRoundTripsAndReportsTerminalWidth)
 {
 #if !defined(_WIN32)
     const auto runtime_dir = std::filesystem::temp_directory_path() /
@@ -20,8 +22,7 @@ int main()
     std::filesystem::create_directory(runtime_dir);
     std::filesystem::permissions(runtime_dir, std::filesystem::perms::owner_all);
     if (setenv("XDG_RUNTIME_DIR", runtime_dir.c_str(), 1) != 0) {
-        std::cerr << "could not set a test runtime directory\n";
-        return 1;
+        FAIL() << "could not set a test runtime directory";
     }
 #endif
 
@@ -29,10 +30,10 @@ int main()
     auto server = shatter::platform::listen_for_control(error);
     if (!server) {
 #if defined(_WIN32)
-        if (shatter::platform::request_control("PING").starts_with("OK running")) return 0;
+        EXPECT_TRUE(shatter::platform::request_control("PING").starts_with("OK running"));
+        return;
 #endif
-        std::cerr << "could not create control listener: " << error << '\n';
-        return 1;
+        FAIL() << "could not create control listener: " << error;
     }
 
     std::string server_error;
@@ -50,22 +51,12 @@ int main()
 
     const std::string response = shatter::platform::request_control("PING");
     worker.join();
-    if (response != "OK platform transport passed\n") {
-        std::cerr << "unexpected control response: " << response << '\n';
-        return 1;
-    }
-    if (!server_error.empty()) {
-        std::cerr << "control transport failed: " << server_error << '\n';
-        return 1;
-    }
-    if (shatter::platform::terminal_width() == 0) {
-        std::cerr << "platform reported a zero terminal width\n";
-        return 1;
-    }
+    EXPECT_EQ(response, "OK platform transport passed\n");
+    EXPECT_TRUE(server_error.empty()) << server_error;
+    EXPECT_GT(shatter::platform::terminal_width(), 0);
 
 #if !defined(_WIN32)
     server.reset();
     std::filesystem::remove_all(runtime_dir);
 #endif
-    return 0;
 }

@@ -1,11 +1,11 @@
 #include "shatter/meter/meter_bus.hpp"
 
-#include <catch2/catch_test_macros.hpp>
+#include <gtest/gtest.h>
 
 #include <array>
 #include <cmath>
 
-TEST_CASE("peak and RMS meter publishes known level in dBFS", "[meter]")
+TEST(MeterTest, PeakAndRmsMeterPublishesKnownLevelInDbfs)
 {
     shatter::meter::PeakRmsMeter meter;
     std::array<float, shatter::meter::PeakRmsMeter::samples_per_window> samples;
@@ -13,24 +13,24 @@ TEST_CASE("peak and RMS meter publishes known level in dBFS", "[meter]")
 
     meter.observe(samples.data(), samples.size());
     const auto reading = meter.reading();
-    CHECK(std::abs(shatter::meter::to_dbfs(reading.peak) - (-6.0206F)) < 0.01F);
-    CHECK(std::abs(shatter::meter::to_dbfs(reading.rms) - (-6.0206F)) < 0.01F);
+    EXPECT_LT(std::abs(shatter::meter::to_dbfs(reading.peak) - (-6.0206F)), 0.01F);
+    EXPECT_LT(std::abs(shatter::meter::to_dbfs(reading.rms) - (-6.0206F)), 0.01F);
 }
 
-TEST_CASE("peak and RMS meter reports digital silence at its documented floor", "[meter]")
+TEST(MeterTest, PeakAndRmsMeterReportsDigitalSilenceAtDocumentedFloor)
 {
     shatter::meter::PeakRmsMeter meter;
     std::array<float, shatter::meter::PeakRmsMeter::samples_per_window> samples{};
 
     meter.observe(samples.data(), samples.size());
     const auto reading = meter.reading();
-    CHECK(reading.peak == 0.0F);
-    CHECK(reading.rms == 0.0F);
-    CHECK(shatter::meter::to_dbfs(reading.peak) == -120.0F);
-    CHECK(shatter::meter::to_dbfs(reading.rms) == -120.0F);
+    EXPECT_EQ(reading.peak, 0.0F);
+    EXPECT_EQ(reading.rms, 0.0F);
+    EXPECT_EQ(shatter::meter::to_dbfs(reading.peak), -120.0F);
+    EXPECT_EQ(shatter::meter::to_dbfs(reading.rms), -120.0F);
 }
 
-TEST_CASE("peak and RMS meter ignores non-finite samples", "[meter]")
+TEST(MeterTest, PeakAndRmsMeterIgnoresNonFiniteSamples)
 {
     shatter::meter::PeakRmsMeter meter;
     std::array<float, shatter::meter::PeakRmsMeter::samples_per_window> samples{};
@@ -39,6 +39,6 @@ TEST_CASE("peak and RMS meter ignores non-finite samples", "[meter]")
 
     meter.observe(samples.data(), samples.size());
     const auto reading = meter.reading();
-    CHECK(reading.peak == 0.0F);
-    CHECK(reading.rms == 0.0F);
+    EXPECT_EQ(reading.peak, 0.0F);
+    EXPECT_EQ(reading.rms, 0.0F);
 }

@@ -59,17 +59,7 @@ message(STATUS "Shatter platform: ${SHATTER_PLATFORM}; audio backend: ${SHATTER_
 
 include(CTest)
 if(BUILD_TESTING)
-    find_package(Catch2 3 QUIET)
-    if(NOT Catch2_FOUND)
-        include(FetchContent)
-        FetchContent_Declare(
-            Catch2
-            GIT_REPOSITORY https://github.com/catchorg/Catch2.git
-            GIT_TAG v3.7.1
-            GIT_SHALLOW TRUE
-        )
-        FetchContent_MakeAvailable(Catch2)
-    endif()
+    find_package(GTest CONFIG REQUIRED)
 endif()
 
 set(SHATTER_SOURCES
@@ -130,7 +120,7 @@ install(TARGETS shatter RUNTIME DESTINATION bin)
 
 if(BUILD_TESTING)
     add_executable(platform_control_test tests/unit/platform-control.cpp)
-    target_link_libraries(platform_control_test PRIVATE shatter_platform)
+    target_link_libraries(platform_control_test PRIVATE shatter_platform GTest::gtest_main)
     add_test(NAME platform_control COMMAND platform_control_test)
     set_tests_properties(platform_control PROPERTIES TIMEOUT 5 RUN_SERIAL TRUE)
     if(UNIX)
@@ -174,30 +164,31 @@ if(BUILD_TESTING)
     add_executable(audio_ring_test tests/unit/audio-ring.cpp)
     target_include_directories(audio_ring_test PRIVATE include)
     target_compile_features(audio_ring_test PRIVATE cxx_std_20)
+    target_link_libraries(audio_ring_test PRIVATE GTest::gtest_main)
     add_test(NAME audio_ring COMMAND audio_ring_test)
 
     add_executable(dsp_test src/engine/dsp.cpp tests/unit/dsp.cpp)
     target_include_directories(dsp_test PRIVATE include)
     target_compile_features(dsp_test PRIVATE cxx_std_20)
-    target_link_libraries(dsp_test PRIVATE Catch2::Catch2WithMain)
+    target_link_libraries(dsp_test PRIVATE GTest::gtest_main)
     add_test(NAME dsp COMMAND dsp_test)
 
     add_executable(meter_test src/meter/meter_bus.cpp tests/unit/meter.cpp)
     target_include_directories(meter_test PRIVATE include)
     target_compile_features(meter_test PRIVATE cxx_std_20)
-    target_link_libraries(meter_test PRIVATE Catch2::Catch2WithMain)
+    target_link_libraries(meter_test PRIVATE GTest::gtest_main)
     add_test(NAME meter COMMAND meter_test)
 
     add_executable(engine_health_test tests/unit/engine-health.cpp)
     target_include_directories(engine_health_test PRIVATE include)
     target_compile_features(engine_health_test PRIVATE cxx_std_20)
-    target_link_libraries(engine_health_test PRIVATE Catch2::Catch2WithMain)
+    target_link_libraries(engine_health_test PRIVATE GTest::gtest_main)
     add_test(NAME engine_health COMMAND engine_health_test)
 
     add_executable(state_store_test src/state/store.cpp tests/unit/state-store.cpp)
     target_include_directories(state_store_test PRIVATE include)
     target_compile_features(state_store_test PRIVATE cxx_std_20)
-    target_link_libraries(state_store_test PRIVATE Catch2::Catch2WithMain)
+    target_link_libraries(state_store_test PRIVATE GTest::gtest_main)
     add_test(NAME state_store COMMAND state_store_test)
 
     if(SHATTER_AUDIO_BACKEND STREQUAL "PIPEWIRE")

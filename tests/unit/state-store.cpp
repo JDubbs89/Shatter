@@ -1,17 +1,20 @@
 #include "shatter/state/store.hpp"
 
-#include <catch2/catch_test_macros.hpp>
+#include <gtest/gtest.h>
 
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <chrono>
 
 namespace {
 
 class TemporaryDirectory {
 public:
     TemporaryDirectory()
-        : path_(std::filesystem::temp_directory_path() / "shatter-state-store-test")
+        : path_(std::filesystem::temp_directory_path() /
+                ("shatter-state-store-test-" + std::to_string(
+                    std::chrono::steady_clock::now().time_since_epoch().count())))
     {
         std::filesystem::remove_all(path_);
         std::filesystem::create_directories(path_);
@@ -27,7 +30,7 @@ private:
 
 } // namespace
 
-TEST_CASE("version two shows load with their existing device binding meaning", "[state-store]")
+TEST(StateStoreTest, VersionTwoShowsLoadWithExistingDeviceBindingMeaning)
 {
     TemporaryDirectory directory;
     {
@@ -42,15 +45,15 @@ TEST_CASE("version two shows load with their existing device binding meaning", "
     shatter::state::Store store(directory.path());
     shatter::state::Show show;
     std::string error;
-    REQUIRE(store.load("legacy", show, error));
-    REQUIRE(show.outputs.size() == 1);
-    REQUIRE(show.outputs[0].devices.size() == 1);
-    CHECK(show.outputs[0].devices[0].identity == "serial-42");
-    CHECK(show.apps[0].identity == "app-id:org.example.Player");
-    CHECK(show.capture_output_identities == std::vector<std::string>{"shatter.output.1"});
+    ASSERT_TRUE(store.load("legacy", show, error)) << error;
+    ASSERT_EQ(show.outputs.size(), 1);
+    ASSERT_EQ(show.outputs[0].devices.size(), 1);
+    EXPECT_EQ(show.outputs[0].devices[0].identity, "serial-42");
+    EXPECT_EQ(show.apps[0].identity, "app-id:org.example.Player");
+    EXPECT_EQ(show.capture_output_identities, (std::vector<std::string>{"shatter.output.1"}));
 }
 
-TEST_CASE("version one shows remain readable without acquiring newer routing state", "[state-store]")
+TEST(StateStoreTest, VersionOneShowsRemainReadableWithoutNewerRoutingState)
 {
     TemporaryDirectory directory;
     {
@@ -63,15 +66,15 @@ TEST_CASE("version one shows remain readable without acquiring newer routing sta
     shatter::state::Store store(directory.path());
     shatter::state::Show show;
     std::string error;
-    REQUIRE(store.load("legacy-v1", show, error));
-    REQUIRE(show.apps.size() == 1);
-    REQUIRE(show.streams.size() == 1);
-    CHECK_FALSE(show.apps[0].has_output_sends);
-    CHECK_FALSE(show.streams[0].has_output_sends);
-    CHECK(show.capture_source_identity.empty());
+    ASSERT_TRUE(store.load("legacy-v1", show, error)) << error;
+    ASSERT_EQ(show.apps.size(), 1);
+    ASSERT_EQ(show.streams.size(), 1);
+    EXPECT_FALSE(show.apps[0].has_output_sends);
+    EXPECT_FALSE(show.streams[0].has_output_sends);
+    EXPECT_TRUE(show.capture_source_identity.empty());
 }
 
-TEST_CASE("shows save backend-neutral device and capture identities", "[state-store]")
+TEST(StateStoreTest, ShowsSaveBackendNeutralDeviceAndCaptureIdentities)
 {
     TemporaryDirectory directory;
     shatter::state::Store store(directory.path());
@@ -81,22 +84,22 @@ TEST_CASE("shows save backend-neutral device and capture identities", "[state-st
         {{"device:serial:headphones-2", "Studio Headphones"}}});
     std::string error;
 
-    REQUIRE(store.save("portable", show, error));
+    ASSERT_TRUE(store.save("portable", show, error)) << error;
     shatter::state::Show loaded;
-    REQUIRE(store.load("portable", loaded, error));
-    CHECK(loaded.capture_source_identity == "device:serial:mic-7");
-    REQUIRE(loaded.outputs.size() == 1);
-    REQUIRE(loaded.outputs[0].devices.size() == 1);
-    CHECK(loaded.outputs[0].devices[0].identity == "device:serial:headphones-2");
+    ASSERT_TRUE(store.load("portable", loaded, error)) << error;
+    EXPECT_EQ(loaded.capture_source_identity, "device:serial:mic-7");
+    ASSERT_EQ(loaded.outputs.size(), 1);
+    ASSERT_EQ(loaded.outputs[0].devices.size(), 1);
+    EXPECT_EQ(loaded.outputs[0].devices[0].identity, "device:serial:headphones-2");
 
     std::ifstream file(directory.path() / "portable.conf");
     const std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-    CHECK(content.starts_with("SHATTER-CONFIG 6\n"));
-    CHECK(content.find("D \"shatter.output.1\" \"device:serial:headphones-2\" \"Studio Headphones\"") != std::string::npos);
-    CHECK(content.find("M \"device:serial:mic-7\"") != std::string::npos);
+    EXPECT_TRUE(content.starts_with("SHATTER-CONFIG 6\n"));
+    EXPECT_NE(content.find("D \"shatter.output.1\" \"device:serial:headphones-2\" \"Studio Headphones\""), std::string::npos);
+    EXPECT_NE(content.find("M \"device:serial:mic-7\""), std::string::npos);
 }
 
-TEST_CASE("show control state round trips for output and capture channels", "[state-store]")
+TEST(StateStoreTest, ShowControlStateRoundTripsForOutputAndCaptureChannels)
 {
     TemporaryDirectory directory;
     shatter::state::Store store(directory.path());
@@ -108,18 +111,18 @@ TEST_CASE("show control state round trips for output and capture channels", "[st
     show.has_capture_sends = true;
     std::string error;
 
-    REQUIRE(store.save("controls", show, error));
+    ASSERT_TRUE(store.save("controls", show, error)) << error;
     shatter::state::Show loaded;
-    REQUIRE(store.load("controls", loaded, error));
-    REQUIRE(loaded.outputs.size() == 1);
-    CHECK(loaded.outputs[0].gain_db == -9.5F);
-    CHECK(loaded.outputs[0].muted);
-    CHECK(loaded.capture_gain_db == -18.0F);
-    CHECK(loaded.capture_muted);
-    CHECK(loaded.capture_output_identities == std::vector<std::string>{"shatter.output.2"});
+    ASSERT_TRUE(store.load("controls", loaded, error)) << error;
+    ASSERT_EQ(loaded.outputs.size(), 1);
+    EXPECT_EQ(loaded.outputs[0].gain_db, -9.5F);
+    EXPECT_TRUE(loaded.outputs[0].muted);
+    EXPECT_EQ(loaded.capture_gain_db, -18.0F);
+    EXPECT_TRUE(loaded.capture_muted);
+    EXPECT_EQ(loaded.capture_output_identities, (std::vector<std::string>{"shatter.output.2"}));
 }
 
-TEST_CASE("version three shows migrate with neutral channel controls", "[state-store]")
+TEST(StateStoreTest, VersionThreeShowsMigrateWithNeutralChannelControls)
 {
     TemporaryDirectory directory;
     {
@@ -133,16 +136,16 @@ TEST_CASE("version three shows migrate with neutral channel controls", "[state-s
     shatter::state::Store store(directory.path());
     shatter::state::Show loaded;
     std::string error;
-    REQUIRE(store.load("v3", loaded, error));
-    REQUIRE(loaded.outputs.size() == 1);
-    CHECK(loaded.outputs[0].gain_db == 0.0F);
-    CHECK_FALSE(loaded.outputs[0].muted);
-    CHECK(loaded.capture_gain_db == 0.0F);
-    CHECK_FALSE(loaded.capture_muted);
-    CHECK(loaded.capture_source_identity == "device:serial:mic");
+    ASSERT_TRUE(store.load("v3", loaded, error)) << error;
+    ASSERT_EQ(loaded.outputs.size(), 1);
+    EXPECT_EQ(loaded.outputs[0].gain_db, 0.0F);
+    EXPECT_FALSE(loaded.outputs[0].muted);
+    EXPECT_EQ(loaded.capture_gain_db, 0.0F);
+    EXPECT_FALSE(loaded.capture_muted);
+    EXPECT_EQ(loaded.capture_source_identity, "device:serial:mic");
 }
 
-TEST_CASE("invalid show load leaves the caller's current state untouched", "[state-store]")
+TEST(StateStoreTest, InvalidShowLoadLeavesCallersCurrentStateUntouched)
 {
     TemporaryDirectory directory;
     {
@@ -155,8 +158,8 @@ TEST_CASE("invalid show load leaves the caller's current state untouched", "[sta
     current.capture_source_identity = "keep-me";
     current.capture_gain_db = -4.0F;
     std::string error;
-    CHECK_FALSE(store.load("invalid", current, error));
-    CHECK_FALSE(error.empty());
-    CHECK(current.capture_source_identity == "keep-me");
-    CHECK(current.capture_gain_db == -4.0F);
+    EXPECT_FALSE(store.load("invalid", current, error));
+    EXPECT_FALSE(error.empty());
+    EXPECT_EQ(current.capture_source_identity, "keep-me");
+    EXPECT_EQ(current.capture_gain_db, -4.0F);
 }
