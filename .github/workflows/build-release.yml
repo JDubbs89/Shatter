@@ -1,0 +1,133 @@
+name: Build, test, and release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux / PipeWire
+            runner: ubuntu-24.04
+            platform: LINUX
+            backend: PIPEWIRE
+            artifact: linux-pipewire
+            package: shatter-linux-pipewire.tar.gz
+          - name: Linux / PulseAudio
+            runner: ubuntu-24.04
+            platform: LINUX
+            backend: PULSEAUDIO
+            artifact: linux-pulseaudio
+            package: shatter-linux-pulseaudio.tar.gz
+          - name: Windows / WASAPI pending (backend unavailable)
+            runner: windows-2022
+            platform: WINDOWS
+            backend: NONE
+            artifact: windows-x64
+            package: shatter-windows-x64.zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux build and test dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            libgmock-dev \
+            libgtest-dev \
+            libpipewire-0.3-dev \
+            pkg-config \
+            pulseaudio-utils \
+            python3
+
+      - name: Install Windows GoogleTest
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: vcpkg install gtest:x64-windows
+
+      - name: Configure Linux
+        if: runner.os == 'Linux'
+        run: >-
+          cmake -S . -B build
+          -DBUILD_TESTING=ON
+          -DSHATTER_PLATFORM=${{ matrix.platform }}
+          -DSHATTER_AUDIO_BACKEND=${{ matrix.backend }}
+
+      - name: Configure Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: >-
+          cmake -S . -B build
+          -DBUILD_TESTING=ON
+          -DSHATTER_PLATFORM=${{ matrix.platform }}
+          -DSHATTER_AUDIO_BACKEND=${{ matrix.backend }}
+          -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+          -DVCPKG_TARGET_TRIPLET=x64-windows
+
+      - name: Build
+        run: cmake --build build --config Release --parallel 2
+
+      - name: Run GoogleTest suites
+        run: >-
+          ctest --test-dir build --build-config Release
+          --tests-regex "^(platform_control|audio_ring|dsp|meter|engine_health|state_store)$"
+          --output-on-failure
+
+      - name: Package Linux binary
+        if: runner.os == 'Linux'
+        env:
+          PACKAGE_NAME: ${{ matrix.package }}
+        run: |
+          package_root="$RUNNER_TEMP/shatter-package"
+          cmake --install build --prefix "$package_root"
+          tar -czf "$RUNNER_TEMP/$PACKAGE_NAME" -C "$package_root" .
+
+      - name: Package Windows binary
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          PACKAGE_NAME: ${{ matrix.package }}
+        run: |
+          $packageRoot = Join-Path $env:RUNNER_TEMP 'shatter-package'
+          cmake --install build --config Release --prefix $packageRoot
+          Compress-Archive -Path (Join-Path $packageRoot '*') `
+            -DestinationPath (Join-Path $env:RUNNER_TEMP $env:PACKAGE_NAME)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shatter-${{ matrix.artifact }}
+          path: ${{ runner.temp }}/${{ matrix.package }}
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish release assets
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build-and-test
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: shatter-*
+          path: dist
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v3
+        with:
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: dist/*
