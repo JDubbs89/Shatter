@@ -221,9 +221,64 @@ record_monitor "$test_root/all-sends-off.raw"
 sleep 0.25
 record_monitor "$test_root/attenuated.raw"
 
+# Keep the playback output active while the capture source disconnects and is
+# rediscovered so teardown overlaps real output callbacks.
+pw-record --target 0 --rate 48000 --channels 2 --format f32 --raw --sample-count 240000 "$test_root/churn.raw" \
+    >"$test_root/churn-record.log" 2>&1 &
+record_pid=$!
+ready=0
+for attempt in $(seq 1 40); do
+    if pw-link -i | grep -q 'pw-record:input_FL'; then ready=1; break; fi
+    sleep 0.05
+done
+if [ "$ready" -ne 1 ]; then
+    echo "capture churn recorder ports did not appear" >&2
+    exit 1
+fi
+pw-link shatter-test-speakers:monitor_FL pw-record:input_FL >/dev/null
+pw-link shatter-test-speakers:monitor_FR pw-record:input_FR >/dev/null
+
+for cycle in 1 2; do
+    kill "$source_pid"
+    wait "$source_pid" 2>/dev/null || true
+    source_pid=
+    retained=0
+    for attempt in $(seq 1 50); do
+        inputs=$("$binary" list in)
+        if printf '%s\n' "$inputs" | grep -Fq "$source_selector"; then retained=1; break; fi
+        sleep 0.1
+    done
+    if [ "$retained" -ne 1 ]; then
+        echo "capture channel did not retain its stable selector after source removal (cycle $cycle): $inputs" >&2
+        exit 1
+    fi
+
+    "$test_source" >"$test_root/source-$cycle.log" 2>&1 &
+    source_pid=$!
+    restored=0
+    for attempt in $(seq 1 50); do
+        inputs=$("$binary" list in)
+        if printf '%s\n' "$inputs" | grep -Fq "$source_selector"; then
+            meter=$("$binary" meters capture)
+            if printf '%s\n' "$meter" | awk -F'|' '$1 ~ /^capture / && $3 + 0 > -60 && $4 + 0 > -60 { found=1 } END { exit !found }'; then
+                restored=1
+                break
+            fi
+        fi
+        sleep 0.1
+    done
+    if [ "$restored" -ne 1 ]; then
+        echo "capture channel did not resume signal with its stable selector (cycle $cycle): $inputs; meter: $meter" >&2
+        cat "$test_root/source-$cycle.log" >&2
+        exit 1
+    fi
+done
+wait "$record_pid" || [ -s "$test_root/churn.raw" ]
+record_pid=
+
 python3 - "$test_root/send-off.raw" "$test_root/send-on.raw" "$test_root/capture-muted.raw" "$test_root/two-sends.raw" \
     "$test_root/named-send-only.raw" "$test_root/all-sends-off.raw" "$test_root/attenuated.raw" \
-    "$test_root/virtual-mic.raw" <<'PY'
+    "$test_root/virtual-mic.raw" "$test_root/churn.raw" <<'PY'
 import math
 import struct
 import sys
@@ -233,7 +288,7 @@ def rms(path):
     samples = struct.unpack("<%df" % (len(raw) // 4), raw)
     return math.sqrt(sum(sample * sample for sample in samples) / len(samples)) if samples else 0.0
 
-off, on, muted, two_sends, named_only, all_off, attenuated, virtual_mic = [rms(path) for path in sys.argv[1:]]
+off, on, muted, two_sends, named_only, all_off, attenuated, virtual_mic, churn = [rms(path) for path in sys.argv[1:]]
 if off > 0.001:
     raise SystemExit("capture speaker send was audible while disabled: rms=%s" % off)
 if on < 0.05:
@@ -251,6 +306,8 @@ if not on * 0.08 < attenuated < on * 0.12:
                      (on, attenuated))
 if virtual_mic < 0.05:
     raise SystemExit("virtual microphone consumer received no capture signal: rms=%s" % virtual_mic)
+if churn < 0.005:
+    raise SystemExit("capture send did not resume after source rediscovery: rms=%s" % churn)
 PY
 
 "$binary" stop

@@ -241,10 +241,9 @@ void PipeWireEngine::output_process(OutputChannel& output)
                 }
 
                 for (auto& capture_channel : capture_channels_) {
-                    if (!capture_channel.in_use) continue;
-                    std::fill(channel_mix.begin(), channel_mix.begin() + block_frames * kChannels, 0.0F);
                     RealtimeAccessGate::Guard capture_guard(capture_channel.mixer_gate);
-                    if (!capture_guard) continue;
+                    if (!capture_guard || !capture_channel.in_use) continue;
+                    std::fill(channel_mix.begin(), channel_mix.begin() + block_frames * kChannels, 0.0F);
                     auto& ring = capture_channel.audio[output_index];
                     const auto consumed = ring.read(channel_mix.data(), block_frames);
                     profile_scope.record_ring_occupancy(ring.available_frames());

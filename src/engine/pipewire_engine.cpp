@@ -1160,8 +1160,6 @@ void PipeWireEngine::destroy_capture_channel(CaptureChannel& channel, bool forge
     channel.process_gate.wait_for_quiescence();
     channel.mixer_gate.wait_for_quiescence();
     for (auto& ring : channel.audio) ring.discard_all();
-    channel.process_gate.reopen();
-    channel.mixer_gate.reopen();
     {
         std::lock_guard lock(nodes_mutex_);
         channel.source_node_id = PW_ID_ANY;
@@ -1174,6 +1172,8 @@ void PipeWireEngine::destroy_capture_channel(CaptureChannel& channel, bool forge
             channel.in_use = false;
         }
     }
+    channel.process_gate.reopen();
+    channel.mixer_gate.reopen();
 }
 
 void PipeWireEngine::update_playback_stream_state(PlaybackStream& stream, pw_stream_state state,

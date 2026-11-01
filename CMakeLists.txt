@@ -226,26 +226,48 @@ if(BUILD_TESTING)
         find_program(PW_RECORD_TEST_EXECUTABLE pw-record)
         find_program(PW_LINK_TEST_EXECUTABLE pw-link)
         find_program(PYTHON3_TEST_EXECUTABLE python3)
-        if(PIPEWIRE_TEST_EXECUTABLE AND WIREPLUMBER_TEST_EXECUTABLE AND PW_CLI_TEST_EXECUTABLE
-           AND WPCTL_TEST_EXECUTABLE AND PW_PLAY_TEST_EXECUTABLE AND PW_RECORD_TEST_EXECUTABLE
-           AND PW_LINK_TEST_EXECUTABLE AND PYTHON3_TEST_EXECUTABLE)
-            add_executable(pipewire_test_source tests/integration/pipewire-test-source.cpp)
-            target_link_libraries(pipewire_test_source PRIVATE PkgConfig::PIPEWIRE)
-            target_compile_features(pipewire_test_source PRIVATE cxx_std_20)
-            add_executable(pipewire_test_input tests/integration/pipewire-test-input.cpp)
-            target_link_libraries(pipewire_test_input PRIVATE PkgConfig::PIPEWIRE)
-            target_compile_features(pipewire_test_input PRIVATE cxx_std_20)
-            add_test(
-                NAME app_playback_routing
-                COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/app-playback-routing.sh"
-                    "$<TARGET_FILE:shatter>" "$<TARGET_FILE:pipewire_test_input>"
-            )
-            add_test(
-                NAME microphone_capture_routing
-                COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/capture-routing.sh"
-                    "$<TARGET_FILE:shatter>" "$<TARGET_FILE:pipewire_test_source>"
-            )
-            set_tests_properties(app_playback_routing microphone_capture_routing PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+        set(_pipewire_test_tools
+            PIPEWIRE_TEST_EXECUTABLE
+            WIREPLUMBER_TEST_EXECUTABLE
+            PW_CLI_TEST_EXECUTABLE
+            WPCTL_TEST_EXECUTABLE
+            PW_PLAY_TEST_EXECUTABLE
+            PW_RECORD_TEST_EXECUTABLE
+            PW_LINK_TEST_EXECUTABLE
+            PYTHON3_TEST_EXECUTABLE
+        )
+        set(_missing_pipewire_test_tools)
+        foreach(_tool_var IN LISTS _pipewire_test_tools)
+            if(NOT ${_tool_var})
+                string(REPLACE "_TEST_EXECUTABLE" "" _tool_name "${_tool_var}")
+                string(TOLOWER "${_tool_name}" _tool_name)
+                string(REPLACE "_" "-" _tool_name "${_tool_name}")
+                list(APPEND _missing_pipewire_test_tools "${_tool_name}")
+            endif()
+        endforeach()
+        if(_missing_pipewire_test_tools)
+            list(JOIN _missing_pipewire_test_tools ", " _missing_tools)
+            message(FATAL_ERROR
+                "PipeWire integration tests are required when BUILD_TESTING is enabled; missing tools: ${_missing_tools}")
         endif()
+
+        add_executable(pipewire_test_source tests/integration/pipewire-test-source.cpp)
+        target_link_libraries(pipewire_test_source PRIVATE PkgConfig::PIPEWIRE)
+        target_compile_features(pipewire_test_source PRIVATE cxx_std_20)
+        add_executable(pipewire_test_input tests/integration/pipewire-test-input.cpp)
+        target_link_libraries(pipewire_test_input PRIVATE PkgConfig::PIPEWIRE)
+        target_compile_features(pipewire_test_input PRIVATE cxx_std_20)
+        add_test(
+            NAME app_playback_routing
+            COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/app-playback-routing.sh"
+                "$<TARGET_FILE:shatter>" "$<TARGET_FILE:pipewire_test_input>"
+        )
+        add_test(
+            NAME microphone_capture_routing
+            COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/capture-routing.sh"
+                "$<TARGET_FILE:shatter>" "$<TARGET_FILE:pipewire_test_source>"
+        )
+        set_tests_properties(app_playback_routing microphone_capture_routing PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+        message(STATUS "PipeWire integration tests: enabled")
     endif()
 endif()
