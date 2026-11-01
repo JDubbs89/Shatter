@@ -12,8 +12,8 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 set(SHATTER_PLATFORM "AUTO" CACHE STRING "Native platform adapter to build (AUTO, LINUX, or WINDOWS)")
 set_property(CACHE SHATTER_PLATFORM PROPERTY STRINGS AUTO LINUX WINDOWS)
-set(SHATTER_AUDIO_BACKEND "AUTO" CACHE STRING "Audio backend to build (AUTO, PIPEWIRE, PULSEAUDIO, or NONE)")
-set_property(CACHE SHATTER_AUDIO_BACKEND PROPERTY STRINGS AUTO PIPEWIRE PULSEAUDIO NONE)
+set(SHATTER_AUDIO_BACKEND "AUTO" CACHE STRING "Audio backend to build (AUTO, PIPEWIRE, PULSEAUDIO, WASAPI, or NONE)")
+set_property(CACHE SHATTER_AUDIO_BACKEND PROPERTY STRINGS AUTO PIPEWIRE PULSEAUDIO WASAPI NONE)
 
 string(TOUPPER "${SHATTER_PLATFORM}" SHATTER_PLATFORM)
 if(SHATTER_PLATFORM STREQUAL "AUTO")
@@ -53,8 +53,12 @@ elseif(SHATTER_AUDIO_BACKEND STREQUAL "PULSEAUDIO")
     endif()
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(PULSEAUDIO REQUIRED IMPORTED_TARGET libpulse)
+elseif(SHATTER_AUDIO_BACKEND STREQUAL "WASAPI")
+    if(NOT SHATTER_PLATFORM STREQUAL "WINDOWS")
+        message(FATAL_ERROR "The WASAPI audio backend is supported only with SHATTER_PLATFORM=WINDOWS.")
+    endif()
 elseif(NOT SHATTER_AUDIO_BACKEND STREQUAL "NONE")
-    message(FATAL_ERROR "Unsupported SHATTER_AUDIO_BACKEND='${SHATTER_AUDIO_BACKEND}'. Choose AUTO, PIPEWIRE, PULSEAUDIO, or NONE.")
+    message(FATAL_ERROR "Unsupported SHATTER_AUDIO_BACKEND='${SHATTER_AUDIO_BACKEND}'. Choose AUTO, PIPEWIRE, PULSEAUDIO, WASAPI, or NONE.")
 endif()
 message(STATUS "Shatter platform: ${SHATTER_PLATFORM}; audio backend: ${SHATTER_AUDIO_BACKEND}")
 
@@ -91,6 +95,8 @@ elseif(SHATTER_AUDIO_BACKEND STREQUAL "PULSEAUDIO")
         src/engine/pulseaudio_backend.cpp
         src/engine/pulseaudio_client.cpp
     )
+elseif(SHATTER_AUDIO_BACKEND STREQUAL "WASAPI")
+    list(APPEND SHATTER_SOURCES src/engine/wasapi_backend.cpp)
 else()
     list(APPEND SHATTER_SOURCES src/engine/unavailable_audio_backend.cpp)
 endif()
@@ -116,6 +122,8 @@ if(SHATTER_AUDIO_BACKEND STREQUAL "PIPEWIRE")
     target_link_libraries(shatter PRIVATE PkgConfig::PIPEWIRE)
 elseif(SHATTER_AUDIO_BACKEND STREQUAL "PULSEAUDIO")
     target_link_libraries(shatter PRIVATE PkgConfig::PULSEAUDIO)
+elseif(SHATTER_AUDIO_BACKEND STREQUAL "WASAPI")
+    target_link_libraries(shatter PRIVATE ole32 propsys)
 endif()
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
@@ -129,6 +137,11 @@ if(BUILD_TESTING)
     target_link_libraries(platform_control_test PRIVATE shatter_platform GTest::gtest_main)
     add_test(NAME platform_control COMMAND platform_control_test)
     set_tests_properties(platform_control PROPERTIES TIMEOUT 5 RUN_SERIAL TRUE)
+    add_executable(wasapi_selection_test tests/unit/wasapi-selection.cpp)
+    target_include_directories(wasapi_selection_test PRIVATE src/engine)
+    target_compile_features(wasapi_selection_test PRIVATE cxx_std_20)
+    target_link_libraries(wasapi_selection_test PRIVATE GTest::gtest_main)
+    add_test(NAME wasapi_selection COMMAND wasapi_selection_test)
     if(UNIX)
         if(SHATTER_AUDIO_BACKEND STREQUAL "PIPEWIRE")
             add_test(
@@ -169,7 +182,7 @@ if(BUILD_TESTING)
                 NAME windows_cli_lifecycle
                 COMMAND "${POWERSHELL_EXECUTABLE}" -NoProfile -ExecutionPolicy Bypass
                     -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/unit/windows-cli-lifecycle.ps1"
-                    "$<TARGET_FILE:shatter>"
+                    "$<TARGET_FILE:shatter>" "${SHATTER_AUDIO_BACKEND}"
             )
             set_tests_properties(windows_cli_lifecycle PROPERTIES TIMEOUT 20 RUN_SERIAL TRUE)
         endif()

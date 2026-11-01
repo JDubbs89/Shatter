@@ -22,7 +22,7 @@ cmake -S . -B build
 cmake --build build
 ```
 
-The platform and audio backend are selected independently with `SHATTER_PLATFORM` and `SHATTER_AUDIO_BACKEND`. Linux defaults to the PipeWire backend. Windows defaults to `NONE` and does not require PipeWire; audio commands report that no backend is configured. PipeWire and PulseAudio are currently supported only on Linux.
+The platform and audio backend are selected independently with `SHATTER_PLATFORM` and `SHATTER_AUDIO_BACKEND`. Linux defaults to the PipeWire backend. Windows defaults to `NONE` and does not require PipeWire. The Windows WASAPI discovery prototype can list active playback sessions and endpoints; app routing is still in development. PipeWire and PulseAudio are available on Linux.
 
 ```powershell
 cmake -S . -B build -DSHATTER_PLATFORM=WINDOWS -DSHATTER_AUDIO_BACKEND=NONE `
@@ -40,13 +40,15 @@ Run the build-install script to select the platform and audio backend, build onl
 sh build-install.sh --platform linux --audio-backend pipewire
 ```
 
-`--platform` accepts `auto`, `linux`, or `windows`; `--audio-backend` accepts `auto`, `pipewire`, `pulseaudio`, or `none`. `auto` uses the native platform and its default backend (PipeWire on Linux, no audio backend on Windows). The platform must match the native toolchain; this script does not cross-compile.
+`--platform` accepts `auto`, `linux`, or `windows`; `--audio-backend` accepts `auto`, `pipewire`, `pulseaudio`, `wasapi`, or `none`. `auto` uses the native platform and its default backend (PipeWire on Linux, no audio backend on Windows). The platform must match the native toolchain; this script does not cross-compile.
 
 For a Windows build from a Windows shell with CMake available:
 
 ```sh
 sh build-install.sh --platform windows --audio-backend none
 ```
+
+Use `--audio-backend wasapi` to build the Windows playback discovery prototype. It can list active playback sessions and endpoints; routing is not available yet.
 
 The Windows install prefix defaults to `%LOCALAPPDATA%/Programs/Shatter`. Set `SHATTER_INSTALL_PREFIX` to choose a different location. Linux installs to `~/.local` by default.
 

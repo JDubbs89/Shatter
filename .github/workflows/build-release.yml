@@ -30,7 +30,7 @@ jobs:
             backend: PULSEAUDIO
             artifact: linux-pulseaudio
             package: shatter-linux-pulseaudio.tar.gz
-          - name: Windows / WASAPI pending (backend unavailable)
+          - name: Windows / no-audio package
             runner: windows-2022
             platform: WINDOWS
             backend: NONE
@@ -80,11 +80,27 @@ jobs:
       - name: Build
         run: cmake --build build --config Release --parallel 2
 
-      - name: Run GoogleTest suites
+      - name: Run all platform test suites
+        run: ctest --test-dir build --build-config Release --output-on-failure
+
+      - name: Configure Windows WASAPI validation build
+        if: runner.os == 'Windows'
+        shell: pwsh
         run: >-
-          ctest --test-dir build --build-config Release
-          --tests-regex "^(platform_control|pulseaudio_selection|audio_ring|dsp|meter|engine_health|state_store)$"
-          --output-on-failure
+          cmake -S . -B build-wasapi
+          -DBUILD_TESTING=ON
+          -DSHATTER_PLATFORM=WINDOWS
+          -DSHATTER_AUDIO_BACKEND=WASAPI
+          -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+          -DVCPKG_TARGET_TRIPLET=x64-windows
+
+      - name: Build Windows WASAPI validation target
+        if: runner.os == 'Windows'
+        run: cmake --build build-wasapi --config Release --parallel 2
+
+      - name: Test Windows WASAPI validation target
+        if: runner.os == 'Windows'
+        run: ctest --test-dir build-wasapi --build-config Release --output-on-failure
 
       - name: Package Linux binary
         if: runner.os == 'Linux'

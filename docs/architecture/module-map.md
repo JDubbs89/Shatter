@@ -14,6 +14,7 @@ This map distinguishes active implementations from planned modules. Active modul
 
 - `src/engine/pipewire_engine.cpp`: PipeWire connection and main-loop lifecycle, app/stream/capture channel state, config application, list presentation, and profiling. It remains the largest active module; channel state and table rendering are coupled to the engine and need an explicit data interface before moving.
 - `src/engine/pulseaudio_backend.cpp`: PulseAudio-protocol backend for listing playback streams and sinks and routing selected apps, including streams created after assignment; `pulseaudio_client.cpp` owns the libpulse connection and event seam. Capture, persistent shows, gain, mute, and custom mixing remain unsupported.
+- `src/engine/wasapi_backend.cpp`: Windows WASAPI discovery prototype for active playback sessions and endpoints; app routing and the PipeWire mixer features remain unsupported until follow-up work.
 - `src/engine/mixer_node.cpp`: realtime input fan-out and per-output mixing callbacks. Callbacks must not block, allocate, or lock.
 - `src/engine/dsp.cpp`: planned home for reusable channel, send, bus, and matrix processing that can be expressed independently of PipeWire buffers.
 - `src/engine/fx_host.cpp`: future P1 LV2 host; not part of the initial routing and mixing proof.
