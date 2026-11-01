@@ -679,7 +679,7 @@ std::string PipeWireEngine::list_inputs(std::size_t) const
             channel->name + " (" + status + ")", send_names(channel->output_mask.load())});
     }
     append_table(table, {"Input channel / type", "Application", "Gain", "Mute", "Playback stream or capture device", "Output sends"},
-        input_rows, {30, 18, 8, 5, 30, 20});
+        input_rows, {40, 18, 8, 5, 30, 40});
 
     const auto unrouted_count = unrouted_playback_streams_.load(std::memory_order_relaxed);
     if (unrouted_count > 0) {

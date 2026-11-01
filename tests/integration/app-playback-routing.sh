@@ -309,15 +309,15 @@ case "$fader_status" in
 esac
 "$binary" set fader output "Headphone Monitor" -inf
 "$binary" inc fader output "Headphone Monitor" +60
-anchor_device_id=$(listed_device_id shatter-test-anchor)
+anchor_device_id=$(listed_device_id "Shatter Test Anchor")
 "$binary" assign out "Headphone Monitor" "$anchor_device_id"
-headphones_device_id=$(listed_device_id shatter-test-headphones)
+headphones_device_id=$(listed_device_id "Shatter Test Headphones")
 "$binary" assign out "Headphone Monitor" "$headphones_device_id"
 "$binary" assign app "$app_a_id" "Headphone Monitor"
 application_input_listing=$("$binary" --list-out)
-application_input_id=$(printf '%s\n' "$application_input_listing" | awk -F'|' '/shatter-test-discord-mic/ { id=$2; gsub(/^[[:space:]]+|[[:space:]]+$/, "", id); print id; exit }')
+application_input_id=$(printf '%s\n' "$application_input_listing" | awk -F'|' '/Discord Microphone Input Capture/ { id=$2; gsub(/^[[:space:]]+|[[:space:]]+$/, "", id); print id; exit }')
 case "$application_input_listing" in
-    *"Available application input captures"*"Discord / shatter-test-discord-mic"*) ;;
+    *"Available application input captures"*"Discord / Discord Microphone Input Capture"*) ;;
     *) echo "application microphone input was not listed as an output destination: $application_input_listing" >&2; exit 1 ;;
 esac
 if [ -z "$application_input_id" ]; then
@@ -344,7 +344,7 @@ input_probe_pid=$!
 probe_input_id=
 for attempt in $(seq 1 50); do
     application_input_listing=$("$binary" --list-out)
-    probe_input_id=$(printf '%s\n' "$application_input_listing" | awk -F'|' '/shatter-test-audio-input/ { id=$2; gsub(/^[[:space:]]+|[[:space:]]+$/, "", id); print id; exit }')
+    probe_input_id=$(printf '%s\n' "$application_input_listing" | awk -F'|' '/Shatter Integration Application Input/ { id=$2; gsub(/^[[:space:]]+|[[:space:]]+$/, "", id); print id; exit }')
     if [ -n "$probe_input_id" ]; then break; fi
     sleep 0.1
 done
@@ -425,7 +425,7 @@ pw-cli create-node adapter '{ factory.name = support.null-audio-sink node.name =
 reconnected_application_input=0
 for attempt in $(seq 1 50); do
     output_listing=$("$binary" --list-out)
-    if printf '%s\n' "$output_listing" | grep -F "$application_input_id" | grep -q 'shatter-test-discord-mic'; then
+    if printf '%s\n' "$output_listing" | grep -F "$application_input_id" | grep -q 'Discord Microphone Input Capture'; then
         if pw-link -l | grep -A1 'shatter-test-discord-mic:input_FL' | grep -q 'shatter.output.1:output_FL'; then
             reconnected_application_input=1
             break
@@ -558,7 +558,7 @@ awk -v stream="$stream_only_rms" -v app="$app_only_rms" 'BEGIN { exit !(stream <
 }
 "$binary" --set-gain app "$app_a_id" 0
 "$binary" assign app "$app_a_id" "Headphone Monitor"
-speakers_device_id=$(listed_device_id shatter-test-speakers)
+speakers_device_id=$(listed_device_id "Shatter Test Speakers")
 "$binary" assign out "Headphone Monitor" "$speakers_device_id"
 sleep 0.3
 pw-link -l >&2
@@ -581,7 +581,7 @@ if rms < 0.005:
 PY
 # Keep the system-default sink as the output's primary target; headphones are an explicit secondary route.
 "$binary" unassign out "Headphone Monitor" "$headphones_device_id"
-headphones_device_id=$(listed_device_id shatter-test-headphones)
+headphones_device_id=$(listed_device_id "Shatter Test Headphones")
 "$binary" assign out "Headphone Monitor" "$headphones_device_id"
 "$binary" save show routes
 config_file="$XDG_CONFIG_HOME/shatter/routes.conf"
