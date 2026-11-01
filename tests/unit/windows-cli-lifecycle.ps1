@@ -2,38 +2,48 @@ param([Parameter(Mandatory = $true)][string]$Binary, [string]$Backend = 'NONE')
 $ErrorActionPreference = 'Stop'
 
 try {
-    & $Binary start | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "shatter start exited with $LASTEXITCODE" }
+    # Exercise fresh backend construction and COM teardown more than once in
+    # the same test run. A single start/stop only verifies process startup.
+    for ($cycle = 1; $cycle -le 2; $cycle++) {
+        & $Binary start | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "shatter start (cycle $cycle) exited with $LASTEXITCODE" }
 
-    $status = (& $Binary status | Out-String)
-    $expectedStatus = if ($Backend -eq 'WASAPI') { 'is running;' } else { 'is running; audio-unavailable:.*no audio backend is configured' }
-    if ($LASTEXITCODE -ne 0 -or $status -notmatch $expectedStatus) {
-        throw "unexpected running status: $status"
-    }
-
-    $inputs = (& $Binary list in | Out-String)
-    $expectedInputs = if ($Backend -eq 'WASAPI') { 'Windows WASAPI playback sessions' } else { 'no audio backend is configured' }
-    if ($LASTEXITCODE -ne 0 -or $inputs -notmatch $expectedInputs) {
-        throw "unexpected input listing: $inputs"
-    }
-
-    if ($Backend -eq 'WASAPI') {
-        $outputs = (& $Binary list out | Out-String)
-        if ($LASTEXITCODE -ne 0 -or $outputs -notmatch 'Windows WASAPI playback endpoints') {
-            throw "unexpected endpoint listing: $outputs"
+        $status = (& $Binary status | Out-String)
+        $expectedStatus = if ($Backend -eq 'WASAPI') { 'is running;' } else { 'is running; audio-unavailable:.*no audio backend is configured' }
+        if ($LASTEXITCODE -ne 0 -or $status -notmatch $expectedStatus) {
+            throw "unexpected running status in cycle ${cycle}: $status"
         }
-        $health = (& $Binary health | Out-String)
-        if ($LASTEXITCODE -ne 0 -or $health -notmatch 'Engine health: (running|degraded)') {
-            throw "unexpected WASAPI health report: $health"
+
+        $inputs = (& $Binary list in | Out-String)
+        $expectedInputs = if ($Backend -eq 'WASAPI') { 'Windows WASAPI playback sessions' } else { 'no audio backend is configured' }
+        if ($LASTEXITCODE -ne 0 -or $inputs -notmatch $expectedInputs) {
+            throw "unexpected input listing in cycle ${cycle}: $inputs"
         }
-    }
 
-    & $Binary stop | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "shatter stop exited with $LASTEXITCODE" }
+        if ($Backend -eq 'WASAPI') {
+            $outputs = (& $Binary list out | Out-String)
+            if ($LASTEXITCODE -ne 0 -or $outputs -notmatch 'Windows WASAPI playback endpoints') {
+                throw "unexpected endpoint listing in cycle ${cycle}: $outputs"
+            }
+            $health = (& $Binary health | Out-String)
+            if ($LASTEXITCODE -ne 0 -or $health -notmatch 'Engine health: (running|degraded)') {
+                throw "unexpected WASAPI health report in cycle ${cycle}: $health"
+            }
 
-    $status = (& $Binary status | Out-String)
-    if ($LASTEXITCODE -ne 0 -or $status -notmatch 'is stopped') {
-        throw "unexpected stopped status: $status"
+            $unsupported = (& $Binary assign app 'Shatter unsupported test app' 'Shatter unsupported test endpoint' 2>&1 | Out-String)
+            $unsupportedExitCode = $LASTEXITCODE
+            if ($unsupportedExitCode -eq 0 -or $unsupported -notmatch 'WASAPI currently supports playback session and endpoint discovery only') {
+                throw "WASAPI did not clearly reject app routing in cycle ${cycle}: $unsupported"
+            }
+        }
+
+        & $Binary stop | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "shatter stop (cycle $cycle) exited with $LASTEXITCODE" }
+
+        $status = (& $Binary status | Out-String)
+        if ($LASTEXITCODE -ne 0 -or $status -notmatch 'is stopped') {
+            throw "unexpected stopped status in cycle ${cycle}: $status"
+        }
     }
 }
 finally {
