@@ -41,7 +41,7 @@ def main(binary):
     sink_name = f"shatter_test_{os.getpid()}"
     app_name = "ShatterTicket05Probe"
     module_id = None
-    player = None
+    players = []
     try:
         loaded = command(["pactl", "load-module", "module-null-sink", f"sink_name={sink_name}",
                           f"sink_properties=device.description={app_name}Sink"], env=env, check=False)
@@ -58,15 +58,15 @@ def main(binary):
             audio.setframerate(sample_rate)
             audio.writeframes(b"\0\0" * sample_rate * 30)
 
-        player = subprocess.Popen(["paplay", "--client-name", app_name, str(audio_path)], env=env,
-                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        players.append(subprocess.Popen(["paplay", "--client-name", app_name, str(audio_path)], env=env,
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
         started = command([binary, "start"], env=env)
         if started.returncode != 0:
             raise RuntimeError(started.stderr.strip() or started.stdout.strip() or "Shatter failed to start")
 
         health = command([binary, "health"], env=env).stdout
         if ("Engine health: running" not in health or "Xruns since engine start" not in health or
-                "I/O latency:" not in health or "pactl list sinks" not in health):
+                "I/O latency:" not in health or "PulseAudio sink query" not in health):
             raise RuntimeError(f"PulseAudio health report is incomplete:\n{health}")
 
         inputs = outputs = ""
@@ -93,8 +93,7 @@ def main(binary):
         if target_id is None:
             raise RuntimeError("PulseAudio test sink disappeared")
 
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
+        def routed_sink_for_app():
             details = command(["pactl", "list", "sink-inputs"], env=env).stdout
             current_sink = None
             matched_sink = None
@@ -112,14 +111,89 @@ def main(binary):
                     matched_app = True
             if matched_app:
                 matched_sink = current_sink
-            if matched_sink == target_id:
-                print("PulseAudio app playback routed to the selected sink.")
+            return matched_sink
+
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if routed_sink_for_app() == target_id:
+                break
+            time.sleep(0.1)
+        else:
+            raise RuntimeError(f"PulseAudio did not move {app_name} to sink {sink_name}")
+
+        # The saved app rule must also catch streams created after the original assignment.
+        players.append(subprocess.Popen(["paplay", "--client-name", app_name, str(audio_path)], env=env,
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            details = command(["pactl", "list", "sink-inputs"], env=env).stdout
+            app_sinks = []
+            current_sink = None
+            matched_app = False
+            for line in details.splitlines():
+                if re.match(r"Sink Input #", line):
+                    if matched_app:
+                        app_sinks.append(current_sink)
+                    matched_app = False
+                    current_sink = None
+                elif line.strip().startswith("Sink:"):
+                    current_sink = line.split(":", 1)[1].strip()
+                elif f'application.name = "{app_name}"' in line:
+                    matched_app = True
+            if matched_app:
+                app_sinks.append(current_sink)
+            if len(app_sinks) >= 2 and all(sink == target_id for sink in app_sinks):
+                print("PulseAudio app playback and a newly-created stream routed to the selected sink.")
+                break
+            time.sleep(0.1)
+        else:
+            raise RuntimeError(f"PulseAudio did not route a newly-created {app_name} stream to {sink_name}")
+
+        # Removing and restoring the selected sink should reapply the active rule.
+        command(["pactl", "unload-module", module_id], env=env)
+        module_id = None
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            sinks_now = command(["pactl", "list", "short", "sinks"], env=env).stdout
+            if sink_name not in sinks_now:
+                break
+            time.sleep(0.1)
+        else:
+            raise RuntimeError(f"PulseAudio did not remove test sink {sink_name}")
+
+        loaded = command(["pactl", "load-module", "module-null-sink", f"sink_name={sink_name}",
+                          f"sink_properties=device.description={app_name}Sink"], env=env)
+        module_id = loaded.stdout.strip()
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            sink_ids = command(["pactl", "list", "short", "sinks"], env=env).stdout.splitlines()
+            target_id = next((line.split("\t", 2)[0] for line in sink_ids
+                              if len(line.split("\t")) > 1 and line.split("\t")[1] == sink_name), None)
+            details = command(["pactl", "list", "sink-inputs"], env=env).stdout
+            app_sinks = []
+            current_sink = None
+            matched_app = False
+            for line in details.splitlines():
+                if re.match(r"Sink Input #", line):
+                    if matched_app:
+                        app_sinks.append(current_sink)
+                    matched_app = False
+                    current_sink = None
+                elif line.strip().startswith("Sink:"):
+                    current_sink = line.split(":", 1)[1].strip()
+                elif f'application.name = "{app_name}"' in line:
+                    matched_app = True
+            if matched_app:
+                app_sinks.append(current_sink)
+            if target_id is not None and len(app_sinks) >= 2 and all(
+                    sink == target_id for sink in app_sinks):
+                print("PulseAudio routing recovered after the selected sink was recreated.")
                 return 0
             time.sleep(0.1)
-        raise RuntimeError(f"PulseAudio did not move {app_name} to sink {sink_name}")
+        raise RuntimeError(f"PulseAudio did not restore {app_name} streams to recreated sink {sink_name}")
     finally:
         command([binary, "stop"], env=env, check=False)
-        if player is not None:
+        for player in players:
             player.terminate()
             try:
                 player.wait(timeout=2)

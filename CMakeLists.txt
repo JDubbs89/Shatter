@@ -51,7 +51,8 @@ elseif(SHATTER_AUDIO_BACKEND STREQUAL "PULSEAUDIO")
     if(NOT SHATTER_PLATFORM STREQUAL "LINUX")
         message(FATAL_ERROR "The PulseAudio audio backend is supported only with SHATTER_PLATFORM=LINUX.")
     endif()
-    find_program(PACTL_EXECUTABLE pactl REQUIRED)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(PULSEAUDIO REQUIRED IMPORTED_TARGET libpulse)
 elseif(NOT SHATTER_AUDIO_BACKEND STREQUAL "NONE")
     message(FATAL_ERROR "Unsupported SHATTER_AUDIO_BACKEND='${SHATTER_AUDIO_BACKEND}'. Choose AUTO, PIPEWIRE, PULSEAUDIO, or NONE.")
 endif()
@@ -86,7 +87,10 @@ if(SHATTER_AUDIO_BACKEND STREQUAL "PIPEWIRE")
         src/pw/virtual_devices.cpp
     )
 elseif(SHATTER_AUDIO_BACKEND STREQUAL "PULSEAUDIO")
-    list(APPEND SHATTER_SOURCES src/engine/pulseaudio_backend.cpp)
+    list(APPEND SHATTER_SOURCES
+        src/engine/pulseaudio_backend.cpp
+        src/engine/pulseaudio_client.cpp
+    )
 else()
     list(APPEND SHATTER_SOURCES src/engine/unavailable_audio_backend.cpp)
 endif()
@@ -110,6 +114,8 @@ target_compile_features(shatter PRIVATE cxx_std_20)
 target_link_libraries(shatter PRIVATE shatter_platform)
 if(SHATTER_AUDIO_BACKEND STREQUAL "PIPEWIRE")
     target_link_libraries(shatter PRIVATE PkgConfig::PIPEWIRE)
+elseif(SHATTER_AUDIO_BACKEND STREQUAL "PULSEAUDIO")
+    target_link_libraries(shatter PRIVATE PkgConfig::PULSEAUDIO)
 endif()
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
@@ -137,9 +143,16 @@ if(BUILD_TESTING)
         endif()
     endif()
     if(SHATTER_AUDIO_BACKEND STREQUAL "PULSEAUDIO")
+        add_executable(pulseaudio_selection_test tests/unit/pulseaudio-selection.cpp)
+        target_include_directories(pulseaudio_selection_test PRIVATE src/engine)
+        target_compile_features(pulseaudio_selection_test PRIVATE cxx_std_20)
+        target_link_libraries(pulseaudio_selection_test PRIVATE GTest::gtest_main)
+        add_test(NAME pulseaudio_selection COMMAND pulseaudio_selection_test)
+
+        find_program(PACTL_TEST_EXECUTABLE pactl)
         find_program(PAPLAY_TEST_EXECUTABLE paplay)
         find_program(PYTHON3_TEST_EXECUTABLE python3)
-        if(PACTL_EXECUTABLE AND PAPLAY_TEST_EXECUTABLE AND PYTHON3_TEST_EXECUTABLE)
+        if(PACTL_TEST_EXECUTABLE AND PAPLAY_TEST_EXECUTABLE AND PYTHON3_TEST_EXECUTABLE)
             add_test(
                 NAME pulseaudio_playback_routing
                 COMMAND "${PYTHON3_TEST_EXECUTABLE}"

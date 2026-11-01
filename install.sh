@@ -55,8 +55,9 @@ if [ "$backend_lower" = pipewire ] &&
     echo "PipeWire development files are required. On Fedora, install them with: sudo dnf install pipewire-devel" >&2
     exit 1
 fi
-if [ "$backend_lower" = pulseaudio ] && ! command -v pactl >/dev/null 2>&1; then
-    echo "The PulseAudio backend requires pactl. Install PulseAudio utilities (for example, pulseaudio-utils) and rerun this script." >&2
+if [ "$backend_lower" = pulseaudio ] &&
+   { ! command -v pkg-config >/dev/null 2>&1 || ! pkg-config --exists libpulse; }; then
+    echo "PulseAudio development files are required. On Fedora, install them with: sudo dnf install pulseaudio-libs-devel" >&2
     exit 1
 fi
 

@@ -15,7 +15,7 @@ This repository is an early prototype. Shatter groups PipeWire playback streams 
 
 ## Build
 
-The Linux PipeWire build requires CMake, a C++20 compiler, pkg-config, and PipeWire development headers. On Fedora, install the PipeWire headers with `sudo dnf install pipewire-devel`. The PulseAudio prototype requires `pactl` at build and runtime and does not require PulseAudio development headers.
+The Linux PipeWire build requires CMake, a C++20 compiler, pkg-config, and PipeWire development headers. On Fedora, install the PipeWire headers with `sudo dnf install pipewire-devel`. The PulseAudio build uses the native PulseAudio client library and requires its development headers. On Fedora, install them with `sudo dnf install pulseaudio-libs-devel`.
 
 ```sh
 cmake -S . -B build
@@ -52,9 +52,9 @@ The Windows install prefix defaults to `%LOCALAPPDATA%/Programs/Shatter`. Set `S
 
 ### PulseAudio playback routing prototype
 
-Install with `sh build-install.sh --platform linux --audio-backend pulseaudio`. Shatter requires `pactl` and a running PulseAudio-compatible server. Use `shatter list in` and `shatter list out`, then route currently active streams with `shatter assign app <application-name-or-binary> <sink-name-or-description>`. `shatter unassign app <application-name-or-binary> <sink>` returns matching active streams to the default sink.
+Install with `sh build-install.sh --platform linux --audio-backend pulseaudio`. Shatter requires a running PulseAudio-compatible server. Use `shatter list in` and `shatter list out`, then route active streams with `shatter assign app <application-name-or-binary> <sink-name-or-description>`. `shatter unassign app <application-name-or-binary> <sink>` returns matching active streams to the default sink.
 
-This prototype only moves active playback streams. It does not persist routing for future streams or implement saved shows, capture routing, custom mixer outputs, gain, mute, sends, stream rename, or profiling. The PipeWire backend remains the full-featured Linux implementation.
+This prototype only routes playback streams. App assignments cover streams created while Shatter is running, but they are not persisted across restarts. Saved shows, capture routing, custom mixer outputs, gain, mute, sends, stream rename, and profiling remain unsupported. The PipeWire backend remains the full-featured Linux implementation.
 
 With the Linux PipeWire backend, the background engine discovers application playback streams and assigns each stream to a per-application channel. Use `shatter list in` to find app names, channel IDs, and stream IDs. Gain and mute accept either the current user-facing name or the corresponding ID. Rename an app channel or stream to set a display alias; this does not change app grouping or audio processing. Names must match exactly; if a name is ambiguous, use the listed Shatter ID. Stream selectors identify currently active streams and can change after a restart. Quote names that contain spaces.
 
