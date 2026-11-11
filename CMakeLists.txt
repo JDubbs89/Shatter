@@ -311,6 +311,25 @@ if(BUILD_TESTING)
                 "PipeWire integration tests are required when BUILD_TESTING is enabled; missing tools: ${_missing_tools}")
         endif()
 
+        execute_process(
+            COMMAND "${WIREPLUMBER_TEST_EXECUTABLE}" --version
+            RESULT_VARIABLE _wireplumber_version_result
+            OUTPUT_VARIABLE _wireplumber_version_output
+            ERROR_VARIABLE _wireplumber_version_error
+            TIMEOUT 10
+        )
+        if(NOT _wireplumber_version_result STREQUAL "0" OR
+           NOT _wireplumber_version_output MATCHES "Compiled with libwireplumber ([0-9]+\\.[0-9]+\\.[0-9]+)")
+            message(FATAL_ERROR
+                "PipeWire integration tests require WirePlumber 0.5.0 or newer; could not determine its version from '${WIREPLUMBER_TEST_EXECUTABLE} --version': ${_wireplumber_version_output}${_wireplumber_version_error}")
+        endif()
+        set(_wireplumber_version "${CMAKE_MATCH_1}")
+        if(_wireplumber_version VERSION_LESS "0.5.0")
+            message(FATAL_ERROR
+                "PipeWire integration tests require WirePlumber 0.5.0 or newer for --profile policy; found ${_wireplumber_version}. Upgrade WirePlumber or configure with -DBUILD_TESTING=OFF.")
+        endif()
+        message(STATUS "PipeWire integration tests: WirePlumber ${_wireplumber_version}")
+
         add_executable(pipewire_test_source tests/integration/pipewire-test-source.cpp)
         target_link_libraries(pipewire_test_source PRIVATE PkgConfig::PIPEWIRE)
         target_compile_features(pipewire_test_source PRIVATE cxx_std_20)

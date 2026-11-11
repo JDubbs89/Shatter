@@ -228,7 +228,9 @@ std::unique_ptr<ControlServer> listen_for_control(std::string& error)
 std::string request_control(std::string_view command)
 {
     std::string error;
-    const std::wstring name = control_pipe_name(error);
+    const PSID sid = current_user_sid(sid_storage_, error);
+    if (sid == nullptr) return {};
+    const std::wstring name = control_pipe_name(sid, error);
     if (name.empty() || !WaitNamedPipeW(name.c_str(), 1000)) return {};
     HANDLE pipe = CreateFileW(name.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
                               FILE_ATTRIBUTE_NORMAL, nullptr);

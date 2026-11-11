@@ -19,7 +19,7 @@ jobs:
       matrix:
         include:
           - name: Linux / PipeWire
-            runner: ubuntu-24.04
+            runner: ubuntu-26.04
             platform: LINUX
             backend: PIPEWIRE
             artifact: linux-pipewire
@@ -130,7 +130,7 @@ jobs:
         run: ctest --test-dir build --build-config Release --output-on-failure --no-tests=error
 
       - name: Package Linux binary
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.backend != 'NONE'
         env:
           PACKAGE_NAME: shatter-${{ steps.version.outputs.version }}-${{ matrix.package }}
         run: |
@@ -139,7 +139,7 @@ jobs:
           tar -czf "$RUNNER_TEMP/$PACKAGE_NAME" -C "$package_root" .
 
       - name: Package Windows binary
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && matrix.backend != 'NONE'
         shell: pwsh
         env:
           PACKAGE_NAME: shatter-${{ steps.version.outputs.version }}-${{ matrix.package }}
@@ -182,6 +182,7 @@ jobs:
           Copy-Item $msi.FullName $env:RUNNER_TEMP
 
       - uses: actions/upload-artifact@v4
+        if: matrix.backend != 'NONE'
         with:
           name: shatter-${{ matrix.artifact }}
           path: |
@@ -213,7 +214,7 @@ jobs:
           generate_release_notes: true
           prerelease: ${{ contains(github.ref_name, '-') }}
           body: |
-            Includes Linux x64 PipeWire, PulseAudio, and no-audio binaries, and Windows x64 WASAPI and no-audio ZIPs and MSI installers.
+            Includes Linux x64 PipeWire and PulseAudio binaries, and Windows x64 WASAPI ZIPs and MSI installers.
 
             WASAPI is a discovery prototype: it lists playback sessions and endpoints; application routing is not implemented. PulseAudio supports prototype playback routing. PipeWire is the full audio backend.
 

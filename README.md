@@ -22,6 +22,10 @@ cmake -S . -B build
 cmake --build build
 ```
 
+Tests are enabled by default. The PipeWire integration tests require WirePlumber
+0.5.0 or newer. Check your version with `wireplumber --version`; upgrade if it is
+older, or pass `-DBUILD_TESTING=OFF` to build without tests.
+
 The platform and audio backend are selected independently with `SHATTER_PLATFORM` and `SHATTER_AUDIO_BACKEND`. Linux defaults to the PipeWire backend. Windows defaults to `NONE` and does not require PipeWire. The Windows WASAPI discovery prototype can list active playback sessions and endpoints; app routing is still in development. PipeWire and PulseAudio are available on Linux.
 
 ```powershell
