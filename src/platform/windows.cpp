@@ -228,6 +228,7 @@ std::unique_ptr<ControlServer> listen_for_control(std::string& error)
 std::string request_control(std::string_view command)
 {
     std::string error;
+    std::vector<std::byte> sid_storage_;
     const PSID sid = current_user_sid(sid_storage_, error);
     if (sid == nullptr) return {};
     const std::wstring name = control_pipe_name(sid, error);
