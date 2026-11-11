@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
