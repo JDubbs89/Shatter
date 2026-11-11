@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstring>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 #include <set>
 #include <sys/resource.h>
@@ -31,6 +32,7 @@ constexpr std::uint32_t kChannels = 2;
 constexpr float kMinimumGainDb = -60.0F;
 constexpr float kMaximumGainDb = 12.0F;
 constexpr std::size_t kFaderTrackWidth = 25;
+constexpr std::size_t kUnboundedColumn = std::numeric_limits<std::size_t>::max();
 
 spa_pod* build_stereo_format(spa_pod_builder* builder)
 {
@@ -679,7 +681,7 @@ std::string PipeWireEngine::list_inputs(std::size_t) const
             channel->name + " (" + status + ")", send_names(channel->output_mask.load())});
     }
     append_table(table, {"Input channel / type", "Application", "Gain", "Mute", "Playback stream or capture device", "Output sends"},
-        input_rows, {40, 18, 8, 5, 30, 40});
+        input_rows, {kUnboundedColumn, kUnboundedColumn, 8, 5, kUnboundedColumn, kUnboundedColumn});
 
     const auto unrouted_count = unrouted_playback_streams_.load(std::memory_order_relaxed);
     if (unrouted_count > 0) {
@@ -705,12 +707,12 @@ std::string PipeWireEngine::list_outputs(std::size_t) const
             const auto sink_id = output.assigned_sink_node_ids[i];
             std::string route;
             if (sink_id == PW_ID_ANY) {
-                route = fit_column(output.assigned_sink_names[i], 20) + " (reconnecting)";
+                route = output.assigned_sink_names[i] + " (reconnecting)";
             } else {
                 const auto target = nodes_.find(sink_id);
                 if (target == nodes_.end()) {
                     const bool app_input = output.assigned_sink_identities[i].starts_with("app-input");
-                    route = fit_column(output.assigned_sink_names[i], 20) +
+                    route = output.assigned_sink_names[i] +
                         (app_input ? " [input] (reconnecting)" : " (reconnecting)");
                 } else {
                     const std::string sink_name = output_destination_name(target->second);
@@ -743,7 +745,7 @@ std::string PipeWireEngine::list_outputs(std::size_t) const
     }
     if (output_rows.empty()) output_rows.push_back({"-", "-", "-", "-", "-", "No output channels"});
     append_table(table, {"Output channel", "Output identity", "Type", "Gain", "Mute", "Assigned destinations"},
-        output_rows, {22, 22, 9, 8, 5, 40});
+        output_rows, {kUnboundedColumn, kUnboundedColumn, 9, 8, 5, kUnboundedColumn});
 
     std::vector<NodeInfo> playback_sinks;
     for (const auto& [id, node] : nodes_) {
@@ -764,7 +766,7 @@ std::string PipeWireEngine::list_outputs(std::size_t) const
         sink_rows.push_back({"-", "No playback devices found"});
     }
     table << "\nAvailable playback devices\n";
-    append_table(table, {"Playback device ID", "Name"}, sink_rows, {24, 54});
+    append_table(table, {"Playback device ID", "Name"}, sink_rows, {kUnboundedColumn, kUnboundedColumn});
 
     std::vector<NodeInfo> application_inputs;
     for (const auto& [id, node] : nodes_) {
@@ -784,7 +786,8 @@ std::string PipeWireEngine::list_outputs(std::size_t) const
     }
     if (input_rows.empty()) input_rows.push_back({"-", "No application input captures found"});
     table << "\nAvailable application input captures\n";
-    append_table(table, {"Application input ID", "Application / capture"}, input_rows, {24, 54});
+    append_table(table, {"Application input ID", "Application / capture"}, input_rows,
+        {kUnboundedColumn, kUnboundedColumn});
     return table.str();
 }
 
@@ -887,7 +890,7 @@ std::string PipeWireEngine::fader_status() const
                                        std::string_view empty_message) {
         if (rows.empty()) rows.push_back({std::string(empty_message), ""});
         table << '\n' << title << '\n';
-        append_table(table, {"Channel name", "Fader position"}, rows, {32, 70});
+        append_table(table, {"Channel name", "Fader position"}, rows, {kUnboundedColumn, 70});
     };
     append_group("Apps", std::move(app_rows), "No app channels");
     append_group("Streams", std::move(stream_rows), "No active playback streams");

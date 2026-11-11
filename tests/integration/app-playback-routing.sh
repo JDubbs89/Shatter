@@ -605,7 +605,7 @@ mv "$test_root/routes.conf" "$config_file"
 "$binary" load show routes
 input_listing=$("$binary" list in)
 case "$input_listing" in
-    *"TestAppA"*"Headpho..."*"TestAppA"*"Headpho..."*) ;;
+    *"TestAppA"*"Headphone Monitor"*"TestAppA"*"Headphone Monitor"*) ;;
     *) echo "loading a show did not restore active app and stream sends: $input_listing" >&2; exit 1 ;;
 esac
 "$binary" --set-gain stream "$stream_a_id" -7
@@ -727,7 +727,7 @@ if [ "$recreated_state" != "-7.0 dB:yes" ]; then
     exit 1
 fi
 recreated_sends=$(printf '%s\n' "$recreated_stream" | awk -F'|' '{ gsub(/^[[:space:]]+|[[:space:]]+$/, "", $7); print $7 }')
-if [ "$recreated_sends" != "speakers, Headpho..." ]; then
+if [ "$recreated_sends" != "speakers, Headphone Monitor" ]; then
     echo "recreated playback stream did not restore its output send: $recreated_stream" >&2
     exit 1
 fi
