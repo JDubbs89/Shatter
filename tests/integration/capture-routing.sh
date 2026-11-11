@@ -194,6 +194,15 @@ grep -F 'I "device-name:Shatter Integration Test Source"' "$config_file" >/dev/n
 "$binary" unassign capture "$source_selector" "Capture Monitor"
 "$binary" delete out "Capture Monitor"
 "$binary" load show capture-routes
+if "$binary" load show missing >/dev/null 2>&1; then
+    echo "expected loading a missing show to fail" >&2
+    exit 1
+fi
+status=$("$binary" status)
+case "$status" in
+    *"Current show: capture-routes"*"Default show (next start): default"*"Autosave show (on stop): default"*) ;;
+    *) echo "expected loaded show with unchanged startup and autosave settings, got: $status" >&2; exit 1 ;;
+esac
 inputs=$("$binary" list in)
 case "$inputs" in
     *"$source_selector"*"Capture Monitor"*) ;;

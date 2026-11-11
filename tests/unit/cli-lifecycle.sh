@@ -17,7 +17,7 @@ esac
 $binary start
 running=$($binary status)
 case "$running" in
-    *"is running"*) ;;
+    *"is running"*"Current show: default"*"Default show (next start): default"*"Autosave show (on stop): default"*) ;;
     *) echo "expected running status, got: $running" >&2; exit 1 ;;
 esac
 
@@ -71,7 +71,21 @@ if $binary --set-mute app app-deadbeef on >/dev/null 2>&1; then
 fi
 
 $binary save show studio
+running=$($binary status)
+case "$running" in
+    *"Current show: default"*) ;;
+    *) echo "saving a copy changed the current show: $running" >&2; exit 1 ;;
+esac
+if $binary load show missing >/dev/null 2>&1; then
+    echo "expected loading a missing show to fail" >&2
+    exit 1
+fi
 $binary set default show studio
+running=$($binary status engine)
+case "$running" in
+    *"Current show: default"*"Default show (next start): studio"*"Autosave show (on stop): default"*) ;;
+    *) echo "expected current and default shows with the original autosave target, got: $running" >&2; exit 1 ;;
+esac
 if [ "$(cat "$XDG_CONFIG_HOME/shatter/default-show")" != "studio" ]; then
     echo "default show selection was not persisted" >&2
     exit 1

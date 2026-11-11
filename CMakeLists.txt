@@ -1,7 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
 
+set(SHATTER_VERSION "0.1.0" CACHE STRING "Shatter package version (major.minor.patch)")
 project(shatter
-    VERSION 0.1.0
+    VERSION "${SHATTER_VERSION}"
     DESCRIPTION "Local desktop audio mixer daemon"
     LANGUAGES CXX
 )
@@ -41,6 +42,24 @@ if(SHATTER_AUDIO_BACKEND STREQUAL "AUTO")
         set(SHATTER_AUDIO_BACKEND "NONE")
     endif()
 endif()
+
+# FindPkgConfig caches absolute SDK paths. Refresh discovery when a temporary
+# SDK has disappeared rather than propagating its stale paths to imported targets.
+foreach(_dependency PIPEWIRE PULSEAUDIO)
+    foreach(_path IN LISTS ${_dependency}_INCLUDE_DIRS ${_dependency}_LINK_LIBRARIES)
+        if(IS_ABSOLUTE "${_path}" AND NOT EXISTS "${_path}")
+            get_cmake_property(_cache_variables CACHE_VARIABLES)
+            foreach(_variable IN LISTS _cache_variables)
+                if(_variable MATCHES "^${_dependency}_|^pkgcfg_lib_${_dependency}_|^__pkg_config_.*_${_dependency}$")
+                    unset(${_variable} CACHE)
+                endif()
+            endforeach()
+            message(STATUS "Refreshing ${_dependency} discovery: cached path no longer exists: ${_path}")
+            break()
+        endif()
+    endforeach()
+endforeach()
+
 if(SHATTER_AUDIO_BACKEND STREQUAL "PIPEWIRE")
     if(NOT SHATTER_PLATFORM STREQUAL "LINUX")
         message(FATAL_ERROR "The PipeWire audio backend is supported only with SHATTER_PLATFORM=LINUX.")
@@ -131,6 +150,46 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 
 install(TARGETS shatter RUNTIME DESTINATION bin)
+if(SHATTER_PLATFORM STREQUAL "LINUX")
+    install(PROGRAMS packaging/systemd/configure-startup.sh DESTINATION share/shatter)
+endif()
+
+if(WIN32)
+    include(InstallRequiredSystemLibraries)
+endif()
+
+option(SHATTER_BUILD_MSI "Enable the Windows MSI package target (requires CMake 3.30+ and WiX 4)" ${WIN32})
+if(SHATTER_BUILD_MSI)
+    if(NOT WIN32)
+        message(FATAL_ERROR "SHATTER_BUILD_MSI requires a Windows toolchain.")
+    endif()
+    if(CMAKE_VERSION VERSION_LESS 3.30)
+        message(FATAL_ERROR "MSI packaging requires CMake 3.30 or newer. Use -DSHATTER_BUILD_MSI=OFF to build without packaging.")
+    endif()
+    set(CPACK_GENERATOR WIX)
+    set(CPACK_PACKAGE_NAME Shatter)
+    set(CPACK_PACKAGE_VENDOR "Shatter")
+    set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "${PROJECT_DESCRIPTION}")
+    set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
+    set(CPACK_PACKAGE_INSTALL_DIRECTORY Shatter)
+    string(TOLOWER "${SHATTER_AUDIO_BACKEND}" _package_backend)
+    set(CPACK_PACKAGE_FILE_NAME "shatter-${PROJECT_VERSION}-windows-${CMAKE_SYSTEM_PROCESSOR}-${_package_backend}")
+    set(CPACK_WIX_VERSION 4)
+    set(CPACK_WIX_INSTALL_SCOPE perMachine)
+    set(CPACK_WIX_UPGRADE_GUID "A46E1892-362F-4974-A321-3C958B4CFC75")
+    set(CPACK_WIX_SKIP_PROGRAM_FOLDER TRUE)
+    set(CPACK_WIX_TEMPLATE "${CMAKE_CURRENT_SOURCE_DIR}/packaging/windows/installer.wxs.in")
+    set(CPACK_WIX_EXTRA_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/packaging/windows/path.wxs")
+    set(CPACK_WIX_PATCH_FILE "${CMAKE_CURRENT_SOURCE_DIR}/packaging/windows/feature.xml")
+    include(CPack)
+    add_custom_target(msi
+        COMMAND "${CMAKE_CPACK_COMMAND}" --config "${CMAKE_CURRENT_BINARY_DIR}/CPackConfig.cmake" -C "$<CONFIG>"
+        DEPENDS shatter
+        WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
+        COMMENT "Building the Shatter Windows MSI installer"
+        VERBATIM
+    )
+endif()
 
 if(BUILD_TESTING)
     add_executable(platform_control_test tests/unit/platform-control.cpp)
@@ -143,6 +202,7 @@ if(BUILD_TESTING)
     target_link_libraries(wasapi_selection_test PRIVATE GTest::gtest_main)
     add_test(NAME wasapi_selection COMMAND wasapi_selection_test)
     if(UNIX)
+        add_test(NAME install_startup COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/tests/unit/install-startup.sh")
         if(SHATTER_AUDIO_BACKEND STREQUAL "PIPEWIRE")
             add_test(
                 NAME cli_lifecycle

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CPackWiXPatch>
+  <CPackWiXFragment Id="#PRODUCTFEATURE">
+    <ComponentRef Id="ShatterPath" />
+    <Feature Id="ShatterAutostart" Title="Start Shatter at sign-in" Level="2">
+      <ComponentRef Id="ShatterAutostartRegistry" />
+    </Feature>
+  </CPackWiXFragment>
+</CPackWiXPatch>

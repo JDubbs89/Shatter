@@ -15,6 +15,11 @@ case "$status" in
     *) echo "expected clear no-audio status, got: $status" >&2; exit 1 ;;
 esac
 
+case "$status" in
+    *"Current show: none"*"Default show (next start): default"*"Autosave show (on stop): disabled"*"Startup show error:"*) ;;
+    *) echo "expected global settings with no loaded show, got: $status" >&2; exit 1 ;;
+esac
+
 health=$($binary health)
 case "$health" in
     *"Engine health: failed-open"*"no audio backend is configured"*"I/O latency: unavailable"*) ;;

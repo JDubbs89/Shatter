@@ -25,12 +25,53 @@ cmake --build build
 The platform and audio backend are selected independently with `SHATTER_PLATFORM` and `SHATTER_AUDIO_BACKEND`. Linux defaults to the PipeWire backend. Windows defaults to `NONE` and does not require PipeWire. The Windows WASAPI discovery prototype can list active playback sessions and endpoints; app routing is still in development. PipeWire and PulseAudio are available on Linux.
 
 ```powershell
-cmake -S . -B build -DSHATTER_PLATFORM=WINDOWS -DSHATTER_AUDIO_BACKEND=NONE `
+cmake -S . -B build -DBUILD_TESTING=OFF -DSHATTER_PLATFORM=WINDOWS -DSHATTER_AUDIO_BACKEND=NONE `
   -DCMAKE_INSTALL_PREFIX="$env:LOCALAPPDATA/Programs/Shatter"
 cmake --build build --config Release
 ```
 
 Linux may also build the control service without an audio backend using `-DSHATTER_AUDIO_BACKEND=NONE`. A PipeWire session and WirePlumber are required for Linux audio routing.
+
+If CMake reports a missing include directory under a deleted temporary SDK, reconfigure with the same command. Shatter refreshes cached PipeWire and PulseAudio discovery when those paths disappear.
+
+### Build a Windows MSI installer
+
+Use Windows with Visual Studio's C++ build tools, CMake 3.30 or newer, and .NET SDK 9 or newer. Install WiX 4, then build the installer from PowerShell:
+
+```powershell
+dotnet tool install --global wix --version 4.0.6 --allow-roll-forward
+wix extension add --global WixToolset.UI.wixext/4.0.6
+cmake -S . -B build -A x64 -DBUILD_TESTING=OFF -DSHATTER_AUDIO_BACKEND=NONE
+cmake --build build --config Release --target msi
+```
+
+The installer is written to `build/shatter-0.1.0-windows-*.msi`. MSI packaging uses CPack's [WiX generator](https://cmake.org/cmake/help/latest/cpack_gen/wix.html). To build the executable with an older CMake, pass `-DSHATTER_BUILD_MSI=OFF`.
+
+Open the MSI to install Shatter for all users; Windows requests administrator permission. Select **Start Shatter when users sign in** if you want automatic startup. It is off by default on a fresh installation. Startup runs in each user's desktop session, so Shatter can access that user's audio devices and settings. Uninstalling removes the startup entry.
+
+The MSI installs under `Program Files/Shatter`, includes the Visual C++ runtime, and adds its `bin` directory to the system PATH. Open a new terminal after installation to run `shatter help`. Stop Shatter with `shatter stop` before upgrading or removing it through Windows Installed apps.
+
+Running an installer again preserves the existing install location and startup choice unless you explicitly change them. A rebuilt installer for the same version replaces the existing installation; a newer version upgrades it. Both keep one installed Shatter entry and one PATH entry. Installing an older version is blocked. Your saved shows and settings are preserved.
+
+For an unattended installation, run `msiexec /i <installer.msi> /qn /norestart` from an administrator terminal. Add `ADDLOCAL=ALL` to enable automatic startup. You can choose a different location with `INSTALL_ROOT="C:\Tools\Shatter"`. To change an existing installation, run `msiexec /i <installer.msi> ADDLOCAL=ShatterAutostart /qn` to enable startup or use `REMOVE=ShatterAutostart` to disable it.
+
+The default Windows build runs the command server with audio unavailable. To package the WASAPI discovery prototype, configure with `-DSHATTER_AUDIO_BACKEND=WASAPI` instead. The two MSI variants replace each other when installed; choose the backend you want to use.
+
+### Publish a GitHub release
+
+The [release workflow](.github/workflows/build-release.yml) builds and tests all five supported configurations:
+
+| Platform | Backend | Release assets |
+| --- | --- | --- |
+| Linux x64 | PipeWire | `.tar.gz` |
+| Linux x64 | PulseAudio prototype | `.tar.gz` |
+| Linux x64 | No audio | `.tar.gz` |
+| Windows x64 | WASAPI discovery prototype | `.zip` and `.msi` |
+| Windows x64 | No audio | `.zip` and `.msi` |
+
+Push a version tag such as `v0.1.1` to publish a release. The tag supplies the package version. Tags with a suffix such as `v0.1.1-rc.1` create a prerelease. Publication waits for every configuration's build and tests, including the Windows MSI repeated-install, upgrade, startup, and uninstall checks. Pull requests, pushes to `main`, and manual runs on branches produce downloadable workflow artifacts without publishing a release. To retry a release manually, select its tag when running the workflow.
+
+Audio-enabled Linux archives require the selected backend's runtime libraries and a running audio session. PipeWire is the full audio backend; the PulseAudio and WASAPI assets retain the prototype limits described here. Extract the Linux archive to your preferred prefix and add its `bin` directory to PATH. Archives do not configure automatic startup during extraction; use the included startup helper described below.
 
 ## Install the local command
 
@@ -51,6 +92,24 @@ sh build-install.sh --platform windows --audio-backend none
 Use `--audio-backend wasapi` to build the Windows playback discovery prototype. It can list active playback sessions and endpoints; routing is not available yet.
 
 The Windows install prefix defaults to `%LOCALAPPDATA%/Programs/Shatter`. Set `SHATTER_INSTALL_PREFIX` to choose a different location. Linux installs to `~/.local` by default.
+
+### Choose automatic startup on Linux
+
+Pass `--startup enable` to configure a systemd user service for your next sign-in:
+
+```sh
+sh build-install.sh --platform linux --audio-backend pipewire --startup enable
+```
+
+Use `--startup disable` to stop and remove that service. The default, `--startup skip`, leaves your startup settings unchanged. Startup configuration requires a running systemd user session. If you call `install.sh` directly, set `SHATTER_STARTUP=enable`, `disable`, or `skip` instead.
+
+After extracting a Linux release archive, configure startup using its helper and the absolute path to the extracted executable:
+
+```sh
+sh "$HOME/.local/share/shatter/configure-startup.sh" enable "$HOME/.local/bin/shatter"
+```
+
+Replace `enable` with `disable` to remove startup before moving or deleting the extracted files. To start the service immediately, first run `shatter stop`, then `systemctl --user start shatter.service`. See the [systemd startup guide](packaging/systemd/README.md) for service commands.
 
 ### PulseAudio playback routing prototype
 
@@ -96,6 +155,8 @@ shatter stop profile
 ```
 
 The older dash-prefixed command forms remain accepted as compatibility aliases.
+
+While the engine is running, `shatter status` shows audio availability, the current show, the default show for the next start, and the show saved automatically on stop. Loading a show changes the current show; the autosave target remains the show selected at startup. If startup show loading fails, status reports the error and autosave is disabled.
 
 `shatter list out` shows Shatter outputs and available playback devices. Routing accepts a displayed device name or the stable ID shown in the listing; if names are ambiguous, use the ID. User-created playback outputs remain disconnected until you assign one to a playback device. Create a capture-type output with `shatter make out <name> capture`; it appears to applications as a virtual microphone source, which each application can select in its input settings. Every physical capture source appears as an input channel in `shatter list in`, so `shatter assign capture "USB Microphone" "Virtual Microphone"` routes it directly without selecting it first. `shatter assign output Headphones "Studio Headphones"` routes a playback output to a device. Use `shatter unassign <type> <source> <destination>` to remove a route, and `shatter delete out <output>` to remove an output channel.
 

@@ -4,14 +4,17 @@ set -eu
 project_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 platform=${SHATTER_PLATFORM:-auto}
 audio_backend=${SHATTER_AUDIO_BACKEND:-auto}
+startup=${SHATTER_STARTUP:-skip}
 
 usage()
 {
     cat <<EOF
-Usage: $0 [--platform auto|linux|windows] [--audio-backend auto|pipewire|pulseaudio|wasapi|none]
+Usage: $0 [--platform auto|linux|windows] [--audio-backend auto|pipewire|pulseaudio|wasapi|none] [--startup enable|disable|skip]
 
 Defaults: auto selects the native platform and that platform's default backend.
 Implemented audio backends: pipewire and pulseaudio (Linux), wasapi (Windows, discovery prototype), and none.
+Startup: enable or disable the Linux systemd user service; skip leaves startup unchanged (default).
+On Windows, choose startup in the MSI installer.
 EOF
 }
 
@@ -29,6 +32,12 @@ while [ "$#" -gt 0 ]; do
             shift 2
             ;;
         --audio-backend=*|--backend=*) audio_backend=${1#*=}; shift ;;
+        --startup)
+            [ "$#" -ge 2 ] || { usage >&2; exit 2; }
+            startup=$2
+            shift 2
+            ;;
+        --startup=*) startup=${1#*=}; shift ;;
         --help|-h) usage; exit 0 ;;
         *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
     esac
@@ -56,5 +65,6 @@ fi
 
 export SHATTER_PLATFORM=$platform
 export SHATTER_AUDIO_BACKEND=$audio_backend
+export SHATTER_STARTUP=$startup
 
 sh "$project_dir/install.sh"

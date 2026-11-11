@@ -1,6 +1,7 @@
 #include "shatter/api/server.hpp"
 #include "shatter/engine/audio_backend.hpp"
 #include "shatter/platform/platform.hpp"
+#include "shatter/state/store.hpp"
 
 #include <charconv>
 #include <chrono>
@@ -60,6 +61,7 @@ int run_server()
     std::string startup_show = "default";
     std::string default_config_error;
     const bool startup_show_loaded = audio_engine.load_default_config(startup_show, default_config_error);
+    std::string current_show = startup_show_loaded ? startup_show : "none";
 
     bool running = true;
     while (running) {
@@ -76,13 +78,26 @@ int run_server()
             const std::string_view input(command);
             if (input.starts_with("OUTPUT-") || input.starts_with("APP-OUTPUT-"))
                 trace_output_command("server.command", input);
-            if (input == "PING") {
+            if (input == "PING" || input == "STATUS") {
                 if (audio_engine.available()) {
                     reply = "OK running audio-ready\n";
                 } else {
                     const std::string reason = audio_error.empty()
                         ? "speaker output is disconnected" : audio_error;
                     reply = "OK running audio-unavailable: " + reason + "\n";
+                }
+                if (input == "STATUS") {
+                    shatter::state::Store store;
+                    std::string default_show, config_error;
+                    reply += "Current show: " + current_show + "\n";
+                    if (store.default_show(default_show, config_error))
+                        reply += "Default show (next start): " + default_show + "\n";
+                    else
+                        reply += "Default show (next start): unavailable: " + config_error + "\n";
+                    reply += "Autosave show (on stop): " +
+                        (startup_show_loaded ? startup_show : std::string("disabled")) + "\n";
+                    if (!startup_show_loaded && !default_config_error.empty())
+                        reply += "Startup show error: " + default_config_error + "\n";
                 }
             } else if (input == "HEALTH") {
                 reply = audio_engine.health_status();
@@ -110,7 +125,10 @@ int run_server()
                     : audio_engine.load_config(name, config_error));
                 if (!valid) reply = "ERR expected CONFIG-SAVE|CONFIG-LOAD <name>\n";
                 else if (!succeeded) reply = "ERR " + config_error + "\n";
-                else reply = "OK configuration " + name + (action == "CONFIG-SAVE" ? " saved\n" : " loaded\n");
+                else {
+                    if (action == "CONFIG-LOAD") current_show = name;
+                    reply = "OK configuration " + name + (action == "CONFIG-SAVE" ? " saved\n" : " loaded\n");
+                }
             } else if (input == "LIST-IN") {
                 reply = audio_engine.list_inputs();
             } else if (input.starts_with("LIST-IN ")) {

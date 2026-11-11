@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?include "cpack_variables.wxi"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="$(var.CPACK_PACKAGE_NAME)"
+           Version="$(var.CPACK_PACKAGE_VERSION)"
+           Manufacturer="$(var.CPACK_PACKAGE_VENDOR)"
+           UpgradeCode="$(var.CPACK_WIX_UPGRADE_GUID)"
+           ProductCode="$(var.CPACK_WIX_PRODUCT_GUID)"
+           Scope="perMachine" InstallerVersion="500" Language="1033" Compressed="yes">
+    <Media Id="1" Cabinet="media1.cab" EmbedCab="yes" />
+    <MajorUpgrade Schedule="afterInstallInitialize" AllowSameVersionUpgrades="yes" MigrateFeatures="yes"
+                  DowngradeErrorMessage="A later version of Shatter is already installed." />
+    <FeatureRef Id="ProductFeature" />
+    <Property Id="INSTALL_ROOT" Secure="yes" />
+    <Property Id="SHATTER_PREVIOUS_INSTALL_ROOT" Secure="yes">
+      <RegistrySearch Id="ExistingShatterInstallRoot" Root="HKLM"
+                      Key="Software\Shatter\Installer" Name="InstallRoot" Type="raw" />
+    </Property>
+    <SetProperty Id="INSTALL_ROOT" Value="[SHATTER_PREVIOUS_INSTALL_ROOT]"
+                 Before="CostFinalize" Sequence="both"
+                 Condition="NOT INSTALL_ROOT AND SHATTER_PREVIOUS_INSTALL_ROOT" />
+    <Property Id="SHATTER_AUTOSTART" Secure="yes">
+      <RegistrySearch Id="ExistingShatterAutostart" Root="HKLM"
+                      Key="Software\Shatter\Installer" Name="Autostart" Type="raw" />
+    </Property>
+    <UI>
+      <TextStyle Id="WixUI_Font_Normal" FaceName="Tahoma" Size="9" />
+      <TextStyle Id="WixUI_Font_Bigger" FaceName="Tahoma" Size="12" />
+      <TextStyle Id="WixUI_Font_Title" FaceName="Tahoma" Size="9" Bold="yes" />
+      <Property Id="DefaultUIFont" Value="WixUI_Font_Normal" />
+      <DialogRef Id="ErrorDlg" />
+      <DialogRef Id="FatalError" />
+      <DialogRef Id="FilesInUse" />
+      <DialogRef Id="MsiRMFilesInUse" />
+      <DialogRef Id="PrepareDlg" />
+      <DialogRef Id="ProgressDlg" />
+      <DialogRef Id="ResumeDlg" />
+      <DialogRef Id="UserExit" />
+      <Publish Dialog="ExitDialog" Control="Finish" Event="EndDialog" Value="Return" Order="999" />
+      <Dialog Id="ShatterInstallDlg" Width="370" Height="180" Title="Shatter Setup" NoMinimize="yes">
+        <Control Id="Description" Type="Text" X="20" Y="20" Width="330" Height="30"
+                 Text="Install Shatter for all users. You can choose whether Shatter starts automatically." />
+        <Control Id="Startup" Type="CheckBox" X="20" Y="65" Width="330" Height="20"
+                 Property="SHATTER_AUTOSTART" CheckBoxValue="1"
+                 Text="Start Shatter when users sign in" />
+        <Control Id="StartupInfo" Type="Text" X="20" Y="95" Width="330" Height="25"
+                 Text="Automatic startup runs in each user's desktop session and is removed when you uninstall." />
+        <Control Id="Install" Type="PushButton" X="190" Y="145" Width="75" Height="20" Default="yes" Text="Install">
+          <Publish Event="AddLocal" Value="ShatterAutostart" Condition="SHATTER_AUTOSTART = &quot;1&quot;" Order="1" />
+          <Publish Event="Remove" Value="ShatterAutostart" Condition="SHATTER_AUTOSTART &lt;&gt; &quot;1&quot;" Order="2" />
+          <Publish Event="EndDialog" Value="Return" Order="3" />
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="275" Y="145" Width="75" Height="20" Cancel="yes" Text="Cancel">
+          <Publish Event="EndDialog" Value="Exit" />
+        </Control>
+      </Dialog>
+    </UI>
+    <InstallUISequence>
+      <Show Dialog="ShatterInstallDlg" Before="ProgressDlg" Condition="NOT Installed" />
+    </InstallUISequence>
+    <UIRef Id="WixUI_Common" />
+    <?include "properties.wxi"?>
+    <?include "product_fragment.wxi"?>
+  </Package>
+</Wix>

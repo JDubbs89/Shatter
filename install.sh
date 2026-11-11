@@ -21,6 +21,20 @@ case "$platform_lower" in
 esac
 install_prefix=${SHATTER_INSTALL_PREFIX:-$default_prefix}
 build_dir=${SHATTER_BUILD_DIR:-"$project_dir/build"}
+startup=${SHATTER_STARTUP:-skip}
+case "$startup" in enable|disable|skip) ;;
+    *) echo "Unsupported startup choice '$startup'; choose enable, disable, or skip." >&2; exit 2 ;;
+esac
+if [ "$startup" != skip ]; then
+    if [ "$platform_lower" != linux ]; then
+        echo "Choose automatic startup in the Windows MSI installer." >&2
+        exit 2
+    fi
+    if ! command -v systemctl >/dev/null 2>&1 || ! systemctl --user show-environment >/dev/null 2>&1; then
+        echo "Startup configuration requires a running systemd user session." >&2
+        exit 1
+    fi
+fi
 
 if [ "$(id -u)" -eq 0 ] && [ -z "${SHATTER_INSTALL_PREFIX:-}" ] && [ "$platform_lower" != windows ]; then
     echo "Run this script as your regular user to install in that user's ~/.local/bin; do not use sudo." >&2
@@ -69,6 +83,9 @@ cmake --build "$build_dir" --target shatter --config Release
 cmake --install "$build_dir" --config Release
 
 if [ "$platform_lower" = windows ]; then installed_binary="$install_prefix/bin/shatter.exe"; else installed_binary="$install_prefix/bin/shatter"; fi
+if [ "$startup" != skip ]; then
+    sh "$project_dir/packaging/systemd/configure-startup.sh" "$startup" "$installed_binary"
+fi
 cat <<EOF
 Installed shatter in $installed_binary
 Ensure $install_prefix/bin is in your PATH, then run: shatter help

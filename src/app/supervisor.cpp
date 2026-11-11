@@ -513,9 +513,11 @@ int run_cli(int argc, char** argv)
             return restart_engine(argv[0]);
         }
         if (command == "status") {
-            const std::string response = shatter::api::request("PING");
+            const std::string response = shatter::api::request("STATUS");
             if (response.starts_with("OK running audio-ready")) {
                 std::cout << "Shatter engine is running; audio backend is ready.\n";
+                const auto newline = response.find('\n');
+                if (newline != std::string::npos) std::cout << response.substr(newline + 1);
             } else if (response.starts_with("OK running audio-unavailable:")) {
                 std::cout << "Shatter engine is running; " << response.substr(std::string("OK running ").size());
             } else {

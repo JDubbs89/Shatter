@@ -23,22 +23,51 @@ jobs:
             platform: LINUX
             backend: PIPEWIRE
             artifact: linux-pipewire
-            package: shatter-linux-pipewire.tar.gz
+            package: linux-pipewire-x64.tar.gz
           - name: Linux / PulseAudio
             runner: ubuntu-24.04
             platform: LINUX
             backend: PULSEAUDIO
             artifact: linux-pulseaudio
-            package: shatter-linux-pulseaudio.tar.gz
-          - name: Windows / no-audio package
+            package: linux-pulseaudio-x64.tar.gz
+          - name: Linux / no audio
+            runner: ubuntu-24.04
+            platform: LINUX
+            backend: NONE
+            artifact: linux-none
+            package: linux-none-x64.tar.gz
+          - name: Windows / WASAPI discovery prototype
+            runner: windows-2022
+            platform: WINDOWS
+            backend: WASAPI
+            artifact: windows-wasapi-x64
+            package: windows-wasapi-x64.zip
+          - name: Windows / no audio
             runner: windows-2022
             platform: WINDOWS
             backend: NONE
-            artifact: windows-x64
-            package: shatter-windows-x64.zip
+            artifact: windows-none-x64
+            package: windows-none-x64.zip
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Determine package version
+        id: version
+        shell: python
+        run: |
+          import os
+          import re
+          from pathlib import Path
+          if os.environ['GITHUB_REF_TYPE'] == 'tag':
+              match = re.fullmatch(r'v([0-9]+\.[0-9]+\.[0-9]+)(?:-[0-9A-Za-z.-]+)?', os.environ['GITHUB_REF_NAME'])
+              if not match:
+                  raise SystemExit('Release tags must use vMAJOR.MINOR.PATCH, optionally followed by a prerelease suffix')
+          else:
+              match = re.search(r'set\(SHATTER_VERSION "([0-9]+\.[0-9]+\.[0-9]+)"', Path('CMakeLists.txt').read_text())
+          version = match.group(1)
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'version={version}\n')
 
       - name: Install Linux build and test dependencies
         if: runner.os == 'Linux'
@@ -61,11 +90,24 @@ jobs:
         shell: pwsh
         run: vcpkg install gtest:x64-windows
 
+      - uses: actions/setup-dotnet@v4
+        if: runner.os == 'Windows'
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Install Windows MSI packaging tools
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 4.0.6 --allow-roll-forward
+          wix extension add --global WixToolset.UI.wixext/4.0.6
+
       - name: Configure Linux
         if: runner.os == 'Linux'
         run: >-
           cmake -S . -B build
           -DBUILD_TESTING=ON
+          -DSHATTER_VERSION=${{ steps.version.outputs.version }}
           -DSHATTER_PLATFORM=${{ matrix.platform }}
           -DSHATTER_AUDIO_BACKEND=${{ matrix.backend }}
 
@@ -75,6 +117,7 @@ jobs:
         run: >-
           cmake -S . -B build
           -DBUILD_TESTING=ON
+          -DSHATTER_VERSION=${{ steps.version.outputs.version }}
           -DSHATTER_PLATFORM=${{ matrix.platform }}
           -DSHATTER_AUDIO_BACKEND=${{ matrix.backend }}
           -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
@@ -84,31 +127,12 @@ jobs:
         run: cmake --build build --config Release --parallel 2
 
       - name: Run all platform test suites
-        run: ctest --test-dir build --build-config Release --output-on-failure
-
-      - name: Configure Windows WASAPI validation build
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: >-
-          cmake -S . -B build-wasapi
-          -DBUILD_TESTING=ON
-          -DSHATTER_PLATFORM=WINDOWS
-          -DSHATTER_AUDIO_BACKEND=WASAPI
-          -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
-          -DVCPKG_TARGET_TRIPLET=x64-windows
-
-      - name: Build Windows WASAPI validation target
-        if: runner.os == 'Windows'
-        run: cmake --build build-wasapi --config Release --parallel 2
-
-      - name: Test Windows WASAPI validation target
-        if: runner.os == 'Windows'
-        run: ctest --test-dir build-wasapi --build-config Release --output-on-failure
+        run: ctest --test-dir build --build-config Release --output-on-failure --no-tests=error
 
       - name: Package Linux binary
         if: runner.os == 'Linux'
         env:
-          PACKAGE_NAME: ${{ matrix.package }}
+          PACKAGE_NAME: shatter-${{ steps.version.outputs.version }}-${{ matrix.package }}
         run: |
           package_root="$RUNNER_TEMP/shatter-package"
           cmake --install build --prefix "$package_root"
@@ -118,17 +142,51 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         env:
-          PACKAGE_NAME: ${{ matrix.package }}
+          PACKAGE_NAME: shatter-${{ steps.version.outputs.version }}-${{ matrix.package }}
         run: |
           $packageRoot = Join-Path $env:RUNNER_TEMP 'shatter-package'
           cmake --install build --config Release --prefix $packageRoot
           Compress-Archive -Path (Join-Path $packageRoot '*') `
             -DestinationPath (Join-Path $env:RUNNER_TEMP $env:PACKAGE_NAME)
 
+      - name: Build Windows MSI installer
+        if: runner.os == 'Windows'
+        run: cmake --build build --config Release --target msi
+
+      - name: Test Windows MSI install, upgrades, and uninstall
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          PACKAGE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $msi = Get-Item 'build/shatter-*-windows-*.msi'
+          if (@($msi).Count -ne 1) { throw 'Expected exactly one MSI installer' }
+          $fixtures = Join-Path $env:RUNNER_TEMP 'shatter-upgrade-fixtures'
+          $version = [version]$env:PACKAGE_VERSION
+          if ($version.Build -lt 65535) {
+            $nextVersion = "$($version.Major).$($version.Minor).$($version.Build + 1)"
+          } elseif ($version.Minor -lt 255) {
+            $nextVersion = "$($version.Major).$($version.Minor + 1).0"
+          } elseif ($version.Major -lt 255) {
+            $nextVersion = "$($version.Major + 1).0.0"
+          } else { throw 'No higher MSI version is available for the upgrade fixture' }
+          cpack --config build/CPackConfig.cmake -C Release -B $fixtures `
+            -D CPACK_PACKAGE_FILE_NAME=rebuilt
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to build the same-version replacement fixture' }
+          cpack --config build/CPackConfig.cmake -C Release -B $fixtures `
+            -D CPACK_PACKAGE_FILE_NAME=upgrade -D "CPACK_PACKAGE_VERSION=$nextVersion"
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to build the newer-version upgrade fixture' }
+          ./tests/integration/windows-msi.ps1 -MsiPath $msi.FullName `
+            -RebuiltMsiPath (Join-Path $fixtures 'rebuilt.msi') `
+            -UpgradeMsiPath (Join-Path $fixtures 'upgrade.msi')
+          Copy-Item $msi.FullName $env:RUNNER_TEMP
+
       - uses: actions/upload-artifact@v4
         with:
           name: shatter-${{ matrix.artifact }}
-          path: ${{ runner.temp }}/${{ matrix.package }}
+          path: |
+            ${{ runner.temp }}/shatter-${{ steps.version.outputs.version }}-${{ matrix.package }}
+            ${{ runner.temp }}/shatter-*-windows-*.msi
           if-no-files-found: error
           retention-days: 14
 
@@ -146,8 +204,19 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Generate release checksums
+        working-directory: dist
+        run: sha256sum *.tar.gz *.zip *.msi > SHA256SUMS
+
       - uses: softprops/action-gh-release@v3
         with:
           generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          body: |
+            Includes Linux x64 PipeWire, PulseAudio, and no-audio binaries, and Windows x64 WASAPI and no-audio ZIPs and MSI installers.
+
+            WASAPI is a discovery prototype: it lists playback sessions and endpoints; application routing is not implemented. PulseAudio supports prototype playback routing. PipeWire is the full audio backend.
+
+            Windows MSI installers offer optional automatic startup at sign-in. Linux archives include share/shatter/configure-startup.sh for optional systemd user startup.
           fail_on_unmatched_files: true
           files: dist/*

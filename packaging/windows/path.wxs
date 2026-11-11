@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Fragment>
+    <DirectoryRef Id="INSTALL_ROOT">
+      <Component Id="ShatterPath" Guid="F629F939-9CD8-40CB-B731-18015085AA49">
+        <RegistryValue Root="HKLM" Key="Software\Shatter\Installer" Name="InstallRoot"
+                       Type="string" Value="[INSTALL_ROOT]" KeyPath="yes" />
+        <Environment Id="ShatterBinPath" Name="PATH" Value="[INSTALL_ROOT]bin"
+                     Action="set" Part="last" System="yes" Permanent="no" />
+      </Component>
+      <Component Id="ShatterAutostartRegistry" Guid="*">
+        <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\Run"
+                       Name="Shatter" Type="string" Value="&quot;[INSTALL_ROOT]bin\shatter.exe&quot; start" />
+        <RegistryValue Root="HKLM" Key="Software\Shatter\Installer" Name="Autostart"
+                       Type="string" Value="1" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+  </Fragment>
+</Wix>
