@@ -588,7 +588,7 @@ config_file="$XDG_CONFIG_HOME/shatter/routes.conf"
 grep -F 'O 1 "shatter.output.1" "Headphone Monitor"' "$config_file" >/dev/null || {
     echo "saved show omitted the output name or generated identity" >&2; cat "$config_file" >&2; exit 1;
 }
-grep -F 'D "shatter.output.1" "device:shatter-test-headphones-path" "shatter-test-headphones"' "$config_file" >/dev/null || {
+grep -F 'D "shatter.output.1" "device:shatter-test-headphones-path" "Shatter Test Headphones"' "$config_file" >/dev/null || {
     echo "saved show omitted the stable physical sink identity" >&2; cat "$config_file" >&2; exit 1;
 }
 "$binary" delete out "Headphone Monitor"

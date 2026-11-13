@@ -271,8 +271,8 @@ bool launch_detached_engine(std::string_view executable, std::string& error)
         return false;
     }
     std::wstring command_line = quote_argument(application) + L" --engine";
-    STARTUPINFOW startup{};
-    startup.cb = sizeof(startup);
+    STARTUPINFOEXW startup{};
+    startup.StartupInfo.cb = sizeof(startup);
     PROCESS_INFORMATION process{};
     SECURITY_ATTRIBUTES inherit_handles{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
     HANDLE null_handle = CreateFileW(L"NUL", GENERIC_READ | GENERIC_WRITE,
@@ -281,18 +281,39 @@ bool launch_detached_engine(std::string_view executable, std::string& error)
         error = "could not open the null device: " + windows_error(GetLastError());
         return false;
     }
-    startup.dwFlags = STARTF_USESTDHANDLES;
-    startup.hStdInput = null_handle;
-    startup.hStdOutput = null_handle;
-    startup.hStdError = null_handle;
-    if (!CreateProcessW(application.c_str(), command_line.data(), nullptr, nullptr, TRUE,
-                        DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW,
-                        nullptr, nullptr, &startup, &process)) {
-        error = windows_error(GetLastError());
+    startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    startup.StartupInfo.hStdInput = null_handle;
+    startup.StartupInfo.hStdOutput = null_handle;
+    startup.StartupInfo.hStdError = null_handle;
+
+    // Redirecting standard handles does not prevent other inheritable handles
+    // (including a caller's output pipes) from keeping the CLI pipeline open.
+    SIZE_T attribute_size = 0;
+    InitializeProcThreadAttributeList(nullptr, 1, 0, &attribute_size);
+    std::vector<std::byte> attribute_storage(attribute_size);
+    startup.lpAttributeList = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attribute_storage.data());
+    if (!InitializeProcThreadAttributeList(startup.lpAttributeList, 1, 0, &attribute_size)) {
+        error = "could not initialize engine handle inheritance: " + windows_error(GetLastError());
         CloseHandle(null_handle);
         return false;
     }
+    if (!UpdateProcThreadAttribute(startup.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+                                   &null_handle, sizeof(null_handle), nullptr, nullptr)) {
+        error = "could not restrict engine handle inheritance: " + windows_error(GetLastError());
+        DeleteProcThreadAttributeList(startup.lpAttributeList);
+        CloseHandle(null_handle);
+        return false;
+    }
+    const BOOL created = CreateProcessW(application.c_str(), command_line.data(), nullptr, nullptr, TRUE,
+        DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT,
+        nullptr, nullptr, &startup.StartupInfo, &process);
+    const DWORD create_error = created ? ERROR_SUCCESS : GetLastError();
+    DeleteProcThreadAttributeList(startup.lpAttributeList);
     CloseHandle(null_handle);
+    if (!created) {
+        error = windows_error(create_error);
+        return false;
+    }
     CloseHandle(process.hThread);
     CloseHandle(process.hProcess);
     return true;
