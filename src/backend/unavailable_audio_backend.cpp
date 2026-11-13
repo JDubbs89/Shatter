@@ -8,7 +8,7 @@ class UnavailableAudioBackend final : public IAudioBackend {
 public:
     static std::string unsupported_operation()
     {
-        return "no audio backend is configured for this build; select a supported backend in CMake";
+        return "no supported audio server is currently available; Shatter will retry automatically";
     }
     bool enumerate_endpoints(std::vector<Endpoint>&, std::string& error) const override
     {
@@ -34,7 +34,7 @@ public:
 private:
     static std::string unavailable_message()
     {
-        return "no audio backend is configured for this build; select a supported backend in CMake";
+        return "no supported audio server is currently available; Shatter will retry automatically";
     }
 };
 
@@ -42,9 +42,9 @@ private:
 
 } // namespace shatter::backend
 
-namespace shatter::mixer {
-std::unique_ptr<IControl> create_engine()
+namespace shatter::backend {
+std::unique_ptr<mixer::IControl> create_unavailable_engine()
 {
-    return std::make_unique<Engine<backend::UnavailableAudioBackend>>();
+    return std::make_unique<mixer::Engine<UnavailableAudioBackend>>();
 }
-} // namespace shatter::mixer
+} // namespace shatter::backend

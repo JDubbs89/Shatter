@@ -57,13 +57,13 @@ export SHATTER_INSTALL_PREFIX="$test_dir/Program Files"
 export SHATTER_BUILD_DIR="$test_dir/build"
 mkdir -p "$SHATTER_INSTALL_PREFIX/bin"
 cp "$binary" "$SHATTER_INSTALL_PREFIX/bin/shatter"
-sh "$project_dir/build-install.sh" --platform linux --audio-backend none --startup enable
+sh "$project_dir/build-install.sh" --platform linux --startup enable
 test -f "$unit"
-sh "$project_dir/build-install.sh" --platform linux --audio-backend none --startup skip
+sh "$project_dir/build-install.sh" --platform linux --startup skip
 test -f "$unit"
-sh "$project_dir/build-install.sh" --platform linux --audio-backend none --startup disable
+sh "$project_dir/build-install.sh" --platform linux --startup disable
 test ! -f "$unit"
-if sh "$project_dir/build-install.sh" --platform windows --audio-backend none --startup enable; then
+if sh "$project_dir/build-install.sh" --platform windows --startup enable; then
     echo 'The shell installer accepted unsupported Windows startup configuration.' >&2
     exit 1
 fi

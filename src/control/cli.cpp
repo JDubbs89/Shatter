@@ -112,7 +112,14 @@ int restart_engine(const char* executable)
 int run_engine()
 {
     try {
-        return shatter::control::run_service();
+        for (;;) {
+            const int result = shatter::control::run_service();
+            if (result != restart_requested_exit) return result;
+            std::string error;
+            if (platform::restart_current_engine(error)) return 0;
+            // Keep automatic recovery available if process replacement fails.
+            std::cerr << "Shatter could not relaunch: " << error << "; restarting the service in place\n";
+        }
     } catch (const std::exception& error) {
         std::cerr << "Shatter engine: " << error.what() << '\n';
         return 1;

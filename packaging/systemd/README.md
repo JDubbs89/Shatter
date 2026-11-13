@@ -3,7 +3,7 @@
 Choose `--startup enable` when running `build-install.sh` to configure automatic startup for your user. You need a running systemd user session. Installation enables the service for your next sign-in; it does not start a second engine while you are installing.
 
 ```sh
-sh build-install.sh --audio-backend pipewire --startup enable
+sh build-install.sh --startup enable
 ```
 
 To start it immediately, stop any engine you started manually, then start the service:
@@ -14,7 +14,7 @@ systemctl --user start shatter.service
 systemctl --user status shatter.service
 ```
 
-The service runs the installed executable and writes logs to the user journal. Read them with `journalctl --user -u shatter.service`. It does not restart automatically after a crash. Normal `shatter` commands work while the service is running.
+The service runs the installed executable and writes logs to the user journal. Read them with `journalctl --user -u shatter.service`. Shatter restarts itself when the audio server changes. The systemd unit does not restart it after a crash. Normal `shatter` commands work while the service is running.
 
 Use `--startup disable` on a later installation to stop and remove the service. Omit the option, or use `--startup skip`, to preserve your existing startup settings.
 

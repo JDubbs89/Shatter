@@ -36,6 +36,8 @@ def main(binary):
     runtime_dir = temp_dir / "runtime"
     runtime_dir.mkdir(mode=0o700)
     env["XDG_RUNTIME_DIR"] = str(runtime_dir)
+    env["PIPEWIRE_RUNTIME_DIR"] = str(runtime_dir)
+    env["PIPEWIRE_REMOTE"] = "shatter-no-pipewire-server"
     env["XDG_CONFIG_HOME"] = str(temp_dir / "config")
 
     sink_name = f"shatter_test_{os.getpid()}"

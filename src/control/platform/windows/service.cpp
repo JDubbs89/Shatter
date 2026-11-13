@@ -263,13 +263,9 @@ std::string request_control(std::string_view command)
     return response;
 }
 
-bool launch_detached_engine(std::string_view executable, std::string& error)
+namespace {
+bool launch_engine(const std::wstring& application, std::string& error)
 {
-    const std::wstring application = widen(executable);
-    if (application.empty()) {
-        error = "could not convert the executable path to Windows text";
-        return false;
-    }
     std::wstring command_line = quote_argument(application) + L" --engine";
     STARTUPINFOEXW startup{};
     startup.StartupInfo.cb = sizeof(startup);
@@ -317,6 +313,42 @@ bool launch_detached_engine(std::string_view executable, std::string& error)
     CloseHandle(process.hThread);
     CloseHandle(process.hProcess);
     return true;
+}
+
+} // namespace
+
+bool launch_detached_engine(std::string_view executable, std::string& error)
+{
+    const auto application = widen(executable);
+    if (application.empty()) { error = "could not convert the executable path to Windows text"; return false; }
+    return launch_engine(application, error);
+}
+
+bool restart_current_engine(std::string& error)
+{
+    std::vector<wchar_t> path(32768);
+    const DWORD length = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
+    if (length == 0 || length >= path.size()) { error = windows_error(GetLastError()); return false; }
+    return launch_engine(std::wstring(path.data(), length), error);
+}
+
+bool notify_control(std::string_view command, std::string& error)
+{
+    std::vector<std::byte> sid_storage;
+    const PSID sid = current_user_sid(sid_storage, error);
+    if (sid == nullptr) return false;
+    const auto name = control_pipe_name(sid, error);
+    if (name.empty() || !WaitNamedPipeW(name.c_str(), 100)) return false;
+    HANDLE pipe = CreateFileW(name.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
+                              FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (pipe == INVALID_HANDLE_VALUE) return false;
+    const std::string message = std::string(command) + "\n";
+    DWORD written = 0;
+    const bool sent = WriteFile(pipe, message.data(), static_cast<DWORD>(message.size()), &written, nullptr) &&
+                      written == message.size();
+    if (!sent) error = windows_error(GetLastError());
+    CloseHandle(pipe);
+    return sent;
 }
 
 unsigned short terminal_width() noexcept

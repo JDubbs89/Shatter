@@ -1,11 +1,9 @@
 #include "backend/pipewire/pipewire_backend.hpp"
 #include "mixer/engine.hpp"
 
-namespace shatter::mixer {
-
-std::unique_ptr<IControl> create_engine()
+namespace shatter::backend {
+std::unique_ptr<mixer::IControl> create_pipewire_engine()
 {
-    return std::make_unique<Engine<backend::PipeWireBackend>>();
+    return std::make_unique<mixer::Engine<PipeWireBackend>>();
 }
-
-} // namespace shatter::mixer
+} // namespace shatter::backend

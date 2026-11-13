@@ -13,8 +13,12 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 set(SHATTER_PLATFORM "AUTO" CACHE STRING "Native platform adapter to build (AUTO, LINUX, or WINDOWS)")
 set_property(CACHE SHATTER_PLATFORM PROPERTY STRINGS AUTO LINUX WINDOWS)
-set(SHATTER_AUDIO_BACKEND "AUTO" CACHE STRING "Audio backend to build (AUTO, PIPEWIRE, PULSEAUDIO, WASAPI, or NONE)")
-set_property(CACHE SHATTER_AUDIO_BACKEND PROPERTY STRINGS AUTO PIPEWIRE PULSEAUDIO WASAPI NONE)
+# Migrate existing build directories away from single-backend selection.
+if(DEFINED SHATTER_AUDIO_BACKEND)
+    message(STATUS "Ignoring legacy SHATTER_AUDIO_BACKEND: all platform audio adapters are built")
+    unset(SHATTER_AUDIO_BACKEND CACHE)
+    unset(SHATTER_AUDIO_BACKEND)
+endif()
 
 string(TOUPPER "${SHATTER_PLATFORM}" SHATTER_PLATFORM)
 if(SHATTER_PLATFORM STREQUAL "AUTO")
@@ -34,15 +38,6 @@ elseif(NOT SHATTER_PLATFORM STREQUAL "WINDOWS" AND NOT SHATTER_PLATFORM STREQUAL
     message(FATAL_ERROR "Unsupported SHATTER_PLATFORM='${SHATTER_PLATFORM}'. Choose AUTO, LINUX, or WINDOWS.")
 endif()
 
-string(TOUPPER "${SHATTER_AUDIO_BACKEND}" SHATTER_AUDIO_BACKEND)
-if(SHATTER_AUDIO_BACKEND STREQUAL "AUTO")
-    if(SHATTER_PLATFORM STREQUAL "LINUX")
-        set(SHATTER_AUDIO_BACKEND "PIPEWIRE")
-    else()
-        set(SHATTER_AUDIO_BACKEND "NONE")
-    endif()
-endif()
-
 # FindPkgConfig caches absolute SDK paths. Refresh discovery when a temporary
 # SDK has disappeared rather than propagating its stale paths to imported targets.
 foreach(_dependency PIPEWIRE PULSEAUDIO)
@@ -60,26 +55,13 @@ foreach(_dependency PIPEWIRE PULSEAUDIO)
     endforeach()
 endforeach()
 
-if(SHATTER_AUDIO_BACKEND STREQUAL "PIPEWIRE")
-    if(NOT SHATTER_PLATFORM STREQUAL "LINUX")
-        message(FATAL_ERROR "The PipeWire audio backend is supported only with SHATTER_PLATFORM=LINUX.")
-    endif()
+if(SHATTER_PLATFORM STREQUAL "LINUX")
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(PIPEWIRE REQUIRED IMPORTED_TARGET libpipewire-0.3)
-elseif(SHATTER_AUDIO_BACKEND STREQUAL "PULSEAUDIO")
-    if(NOT SHATTER_PLATFORM STREQUAL "LINUX")
-        message(FATAL_ERROR "The PulseAudio audio backend is supported only with SHATTER_PLATFORM=LINUX.")
-    endif()
-    find_package(PkgConfig REQUIRED)
     pkg_check_modules(PULSEAUDIO REQUIRED IMPORTED_TARGET libpulse)
-elseif(SHATTER_AUDIO_BACKEND STREQUAL "WASAPI")
-    if(NOT SHATTER_PLATFORM STREQUAL "WINDOWS")
-        message(FATAL_ERROR "The WASAPI audio backend is supported only with SHATTER_PLATFORM=WINDOWS.")
-    endif()
-elseif(NOT SHATTER_AUDIO_BACKEND STREQUAL "NONE")
-    message(FATAL_ERROR "Unsupported SHATTER_AUDIO_BACKEND='${SHATTER_AUDIO_BACKEND}'. Choose AUTO, PIPEWIRE, PULSEAUDIO, WASAPI, or NONE.")
 endif()
-message(STATUS "Shatter platform: ${SHATTER_PLATFORM}; audio backend: ${SHATTER_AUDIO_BACKEND}")
+find_package(Threads REQUIRED)
+message(STATUS "Shatter platform: ${SHATTER_PLATFORM}; audio selection: automatic at runtime")
 
 include(CTest)
 if(BUILD_TESTING)
@@ -109,8 +91,13 @@ else()
 endif()
 target_include_directories(shatter_control_platform PUBLIC src)
 
-if(SHATTER_AUDIO_BACKEND STREQUAL "PIPEWIRE")
-    add_library(shatter_backend STATIC
+add_library(shatter_backend STATIC
+    src/backend/selection.cpp
+    src/backend/unavailable_audio_backend.cpp
+)
+if(SHATTER_PLATFORM STREQUAL "LINUX")
+    target_sources(shatter_backend PRIVATE
+        src/backend/detection_linux.cpp
         src/backend/pipewire/factory.cpp
         src/backend/pipewire/pipewire_backend.cpp
         src/backend/pipewire/audio_callbacks.cpp
@@ -118,29 +105,27 @@ if(SHATTER_AUDIO_BACKEND STREQUAL "PIPEWIRE")
         src/backend/pipewire/endpoints.cpp
         src/backend/pipewire/routing.cpp
         src/backend/pipewire/virtual_devices.cpp
-    )
-    target_link_libraries(shatter_backend PRIVATE PkgConfig::PIPEWIRE)
-elseif(SHATTER_AUDIO_BACKEND STREQUAL "PULSEAUDIO")
-    add_library(shatter_backend STATIC
         src/backend/pulseaudio/pulseaudio_backend.cpp
         src/backend/pulseaudio/pulseaudio_client.cpp
     )
-    target_link_libraries(shatter_backend PRIVATE PkgConfig::PULSEAUDIO)
-elseif(SHATTER_AUDIO_BACKEND STREQUAL "WASAPI")
-    add_library(shatter_backend STATIC src/backend/wasapi/wasapi_backend.cpp)
-    target_link_libraries(shatter_backend PRIVATE ole32 propsys)
+    target_link_libraries(shatter_backend PRIVATE PkgConfig::PIPEWIRE PkgConfig::PULSEAUDIO)
 else()
-    add_library(shatter_backend STATIC src/backend/unavailable_audio_backend.cpp)
+    target_sources(shatter_backend PRIVATE
+        src/backend/detection_windows.cpp
+        src/backend/wasapi/wasapi_backend.cpp
+    )
+    target_link_libraries(shatter_backend PRIVATE ole32 propsys advapi32)
 endif()
-target_link_libraries(shatter_backend PUBLIC shatter_mixer)
+target_link_libraries(shatter_backend PUBLIC shatter_mixer PRIVATE Threads::Threads)
 
 add_library(shatter_control STATIC
     src/control/cli.cpp
     src/control/service.cpp
+    src/control/backend_watcher.cpp
     src/control/surfaces/osc.cpp
     src/control/surfaces/midi.cpp
 )
-target_link_libraries(shatter_control PUBLIC shatter_backend shatter_control_platform)
+target_link_libraries(shatter_control PUBLIC shatter_backend shatter_control_platform PRIVATE Threads::Threads)
 
 add_executable(shatter src/main.cpp)
 target_link_libraries(shatter PRIVATE shatter_control)
@@ -175,8 +160,7 @@ if(SHATTER_BUILD_MSI)
     set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "${PROJECT_DESCRIPTION}")
     set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
     set(CPACK_PACKAGE_INSTALL_DIRECTORY Shatter)
-    string(TOLOWER "${SHATTER_AUDIO_BACKEND}" _package_backend)
-    set(CPACK_PACKAGE_FILE_NAME "shatter-${PROJECT_VERSION}-windows-${CMAKE_SYSTEM_PROCESSOR}-${_package_backend}")
+    set(CPACK_PACKAGE_FILE_NAME "shatter-${PROJECT_VERSION}-windows-${CMAKE_SYSTEM_PROCESSOR}")
     set(CPACK_WIX_VERSION 4)
     set(CPACK_WIX_INSTALL_SCOPE perMachine)
     set(CPACK_WIX_UPGRADE_GUID "A46E1892-362F-4974-A321-3C958B4CFC75")
@@ -195,6 +179,10 @@ if(SHATTER_BUILD_MSI)
 endif()
 
 if(BUILD_TESTING)
+    add_executable(backend_selection_test src/backend/selection_test.cpp)
+    target_link_libraries(backend_selection_test PRIVATE shatter_backend GTest::gtest_main)
+    add_test(NAME backend_selection COMMAND backend_selection_test)
+
     add_executable(backend_contract_test src/backend/contract_test.cpp)
     target_link_libraries(backend_contract_test PRIVATE shatter_backend GTest::gtest_main)
     add_test(NAME backend_contract COMMAND backend_contract_test)
@@ -210,19 +198,12 @@ if(BUILD_TESTING)
     add_test(NAME wasapi_selection COMMAND wasapi_selection_test)
     if(UNIX)
         add_test(NAME install_startup COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/tests/unit/install-startup.sh")
-        if(SHATTER_AUDIO_BACKEND STREQUAL "PIPEWIRE")
-            add_test(
-                NAME cli_lifecycle
-                COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/tests/unit/cli-lifecycle.sh" "$<TARGET_FILE:shatter>"
-            )
-        elseif(SHATTER_AUDIO_BACKEND STREQUAL "NONE")
-            add_test(
-                NAME cli_platform_lifecycle
-                COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/tests/unit/cli-no-audio.sh" "$<TARGET_FILE:shatter>"
-            )
-        endif()
+        add_test(NAME cli_lifecycle
+            COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/tests/unit/cli-lifecycle.sh" "$<TARGET_FILE:shatter>")
+        add_test(NAME cli_platform_lifecycle
+            COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/tests/unit/cli-no-audio.sh" "$<TARGET_FILE:shatter>")
     endif()
-    if(SHATTER_AUDIO_BACKEND STREQUAL "PULSEAUDIO")
+    if(SHATTER_PLATFORM STREQUAL "LINUX")
         add_executable(pulseaudio_selection_test tests/unit/pulseaudio-selection.cpp)
         target_include_directories(pulseaudio_selection_test PRIVATE src)
         target_compile_features(pulseaudio_selection_test PRIVATE cxx_std_20)
@@ -249,7 +230,7 @@ if(BUILD_TESTING)
                 NAME windows_cli_lifecycle
                 COMMAND "${POWERSHELL_EXECUTABLE}" -NoProfile -ExecutionPolicy Bypass
                     -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/unit/windows-cli-lifecycle.ps1"
-                    "$<TARGET_FILE:shatter>" "${SHATTER_AUDIO_BACKEND}"
+                    "$<TARGET_FILE:shatter>"
             )
             set_tests_properties(windows_cli_lifecycle PROPERTIES TIMEOUT 20 RUN_SERIAL TRUE)
         endif()
@@ -295,7 +276,7 @@ if(BUILD_TESTING)
     target_link_libraries(state_store_test PRIVATE shatter_mixer GTest::gtest_main)
     add_test(NAME state_store COMMAND state_store_test)
 
-    if(SHATTER_AUDIO_BACKEND STREQUAL "PIPEWIRE")
+    if(SHATTER_PLATFORM STREQUAL "LINUX")
         find_program(PIPEWIRE_TEST_EXECUTABLE pipewire)
         find_program(WIREPLUMBER_TEST_EXECUTABLE wireplumber)
         find_program(PW_CLI_TEST_EXECUTABLE pw-cli)
@@ -364,6 +345,12 @@ if(BUILD_TESTING)
             COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/capture-routing.sh"
                 "$<TARGET_FILE:shatter>" "$<TARGET_FILE:pipewire_test_source>"
         )
+        find_program(PIPEWIRE_PULSE_TEST_EXECUTABLE pipewire-pulse REQUIRED)
+        find_program(PACTL_TEST_EXECUTABLE pactl REQUIRED)
+        add_test(NAME automatic_backend_restart
+            COMMAND "${PYTHON3_TEST_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/backend-restart.py"
+                "$<TARGET_FILE:shatter>")
+        set_tests_properties(automatic_backend_restart PROPERTIES TIMEOUT 150 RUN_SERIAL TRUE)
         set_tests_properties(app_playback_routing microphone_capture_routing PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
         message(STATUS "PipeWire integration tests: enabled")
     endif()

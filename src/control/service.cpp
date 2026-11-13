@@ -1,4 +1,6 @@
 #include "control/service.hpp"
+#include "control/backend_watcher.hpp"
+#include "backend/selection.hpp"
 #include "mixer/control.hpp"
 #include "control/platform/service.hpp"
 #include "mixer/state/store.hpp"
@@ -54,7 +56,8 @@ int run_service()
         return 1;
     }
 
-    auto engine = shatter::mixer::create_engine();
+    const auto server = backend::detect_server();
+    auto engine = backend::create_engine(server.kind);
     auto& audio_engine = *engine;
     std::string audio_error;
     audio_engine.start(audio_error);
@@ -63,6 +66,8 @@ int run_service()
     const bool startup_show_loaded = audio_engine.load_default_config(startup_show, default_config_error);
     std::string current_show = startup_show_loaded ? startup_show : "none";
 
+    BackendWatcher watcher(server);
+    bool restarting = false;
     bool running = true;
     while (running) {
         auto connection = control_server->accept(transport_error);
@@ -87,6 +92,7 @@ int run_service()
                     reply = "OK running audio-unavailable: " + reason + "\n";
                 }
                 if (input == "STATUS") {
+                    reply += "Backend: " + std::string(backend::name(server.kind)) + "\n";
                     shatter::mixer::state::Store store;
                     std::string default_show, config_error;
                     reply += "Current show: " + current_show + "\n";
@@ -103,7 +109,9 @@ int run_service()
                 reply = audio_engine.health_status();
                 if (!audio_engine.available() && !audio_error.empty())
                     reply += "Backend open error: " + audio_error + "\n";
-            } else if (input == "STOP") {
+            } else if (input == "STOP" || (input == "BACKEND-RESTART" && watcher.restart_requested())) {
+                restarting = input == "BACKEND-RESTART";
+                watcher.stop();
                 std::string save_error;
                 if (!startup_show_loaded)
                     reply = "OK stopping\n";
@@ -374,7 +382,7 @@ int run_service()
         std::string send_error;
         connection->send(reply, send_error);
     }
-    return running ? 1 : 0;
+    return restarting ? restart_requested_exit : running ? 1 : 0;
 }
 
 

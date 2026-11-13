@@ -24,6 +24,12 @@ public:
 
 std::unique_ptr<ControlServer> listen_for_control(std::string& error);
 std::string request_control(std::string_view command);
+// Fire-and-forget notification used by the backend watcher to wake accept().
+// It must not wait for the command response (shutdown joins the watcher).
+bool notify_control(std::string_view command, std::string& error);
+// Call after the old control transport and all native audio state are destroyed.
+// Linux replaces the process image; Windows launches a fresh detached process.
+bool restart_current_engine(std::string& error);
 bool launch_detached_engine(std::string_view executable, std::string& error);
 unsigned short terminal_width() noexcept;
 

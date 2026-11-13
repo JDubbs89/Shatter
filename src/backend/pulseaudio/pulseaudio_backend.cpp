@@ -347,9 +347,9 @@ private:
 
 } // namespace shatter::backend
 
-namespace shatter::mixer {
-std::unique_ptr<IControl> create_engine()
+namespace shatter::backend {
+std::unique_ptr<mixer::IControl> create_pulseaudio_engine()
 {
-    return std::make_unique<Engine<backend::PulseAudioBackend>>();
+    return std::make_unique<mixer::Engine<PulseAudioBackend>>();
 }
-} // namespace shatter::mixer
+} // namespace shatter::backend

@@ -18,36 +18,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: Linux / PipeWire
+          - name: Linux
             runner: ubuntu-26.04
             platform: LINUX
-            backend: PIPEWIRE
-            artifact: linux-pipewire
-            package: linux-pipewire-x64.tar.gz
-          - name: Linux / PulseAudio
-            runner: ubuntu-24.04
-            platform: LINUX
-            backend: PULSEAUDIO
-            artifact: linux-pulseaudio
-            package: linux-pulseaudio-x64.tar.gz
-          - name: Linux / no audio
-            runner: ubuntu-24.04
-            platform: LINUX
-            backend: NONE
-            artifact: linux-none
-            package: linux-none-x64.tar.gz
-          - name: Windows / WASAPI discovery prototype
+            artifact: linux-x64
+            package: linux-x64.tar.gz
+          - name: Windows
             runner: windows-2022
             platform: WINDOWS
-            backend: WASAPI
-            artifact: windows-wasapi-x64
-            package: windows-wasapi-x64.zip
-          - name: Windows / no audio
-            runner: windows-2022
-            platform: WINDOWS
-            backend: NONE
-            artifact: windows-none-x64
-            package: windows-none-x64.zip
+            artifact: windows-x64
+            package: windows-x64.zip
 
     steps:
       - uses: actions/checkout@v4
@@ -80,6 +60,7 @@ jobs:
             libpipewire-0.3-dev \
             pipewire \
             pipewire-bin \
+            pipewire-pulse \
             pkg-config \
             pulseaudio-utils \
             python3 \
@@ -109,7 +90,6 @@ jobs:
           -DBUILD_TESTING=ON
           -DSHATTER_VERSION=${{ steps.version.outputs.version }}
           -DSHATTER_PLATFORM=${{ matrix.platform }}
-          -DSHATTER_AUDIO_BACKEND=${{ matrix.backend }}
 
       - name: Configure Windows
         if: runner.os == 'Windows'
@@ -119,7 +99,6 @@ jobs:
           -DBUILD_TESTING=ON
           "-DSHATTER_VERSION=${{ steps.version.outputs.version }}"
           -DSHATTER_PLATFORM=${{ matrix.platform }}
-          -DSHATTER_AUDIO_BACKEND=${{ matrix.backend }}
           -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
           -DVCPKG_TARGET_TRIPLET=x64-windows
 
@@ -130,7 +109,7 @@ jobs:
         run: ctest --test-dir build --build-config Release --output-on-failure --no-tests=error
 
       - name: Package Linux binary
-        if: runner.os == 'Linux' && matrix.backend != 'NONE'
+        if: runner.os == 'Linux'
         env:
           PACKAGE_NAME: shatter-${{ steps.version.outputs.version }}-${{ matrix.package }}
         run: |
@@ -139,7 +118,7 @@ jobs:
           tar -czf "$RUNNER_TEMP/$PACKAGE_NAME" -C "$package_root" .
 
       - name: Package Windows binary
-        if: runner.os == 'Windows' && matrix.backend != 'NONE'
+        if: runner.os == 'Windows'
         shell: pwsh
         env:
           PACKAGE_NAME: shatter-${{ steps.version.outputs.version }}-${{ matrix.package }}
@@ -193,7 +172,6 @@ jobs:
             }
 
       - uses: actions/upload-artifact@v4
-        if: matrix.backend != 'NONE'
         with:
           name: shatter-${{ matrix.artifact }}
           path: |
@@ -225,9 +203,9 @@ jobs:
           generate_release_notes: true
           prerelease: ${{ contains(github.ref_name, '-') }}
           body: |
-            Includes Linux x64 PipeWire and PulseAudio binaries, and Windows x64 WASAPI ZIPs and MSI installers.
+            Includes one Linux x64 archive with automatic PipeWire/PulseAudio selection, and Windows x64 ZIP and MSI installers.
 
-            WASAPI is a discovery prototype: it lists playback sessions and endpoints; application routing is not implemented. PulseAudio supports prototype playback routing. PipeWire is the full audio backend.
+            The daemon detects audio-server changes and restarts automatically. PipeWire provides full mixing, PulseAudio provides prototype playback routing, and WASAPI provides playback discovery. Linux requires both PipeWire and PulseAudio client runtime libraries.
 
             Windows MSI installers offer optional automatic startup at sign-in. Linux archives include share/shatter/configure-startup.sh for optional systemd user startup.
           fail_on_unmatched_files: true

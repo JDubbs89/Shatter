@@ -229,6 +229,33 @@ bool launch_detached_engine(std::string_view executable, std::string& error)
     return true;
 }
 
+bool notify_control(std::string_view command, std::string& error)
+{
+    const auto path = control_socket_path();
+    const int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+    if (fd < 0) { error = std::strerror(errno); return false; }
+    sockaddr_un address{};
+    address.sun_family = AF_UNIX;
+    std::strncpy(address.sun_path, path.c_str(), sizeof(address.sun_path) - 1);
+    bool sent = false;
+    if (connect(fd, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) == 0) {
+        const std::string message = std::string(command) + "\n";
+        sent = ::send(fd, message.data(), message.size(), MSG_NOSIGNAL | MSG_DONTWAIT) ==
+               static_cast<ssize_t>(message.size());
+    }
+    if (!sent) error = std::strerror(errno);
+    close(fd);
+    return sent;
+}
+
+bool restart_current_engine(std::string& error)
+{
+    char* const arguments[] = {const_cast<char*>("shatter"), const_cast<char*>("--engine"), nullptr};
+    execv("/proc/self/exe", arguments);
+    error = std::strerror(errno);
+    return false;
+}
+
 unsigned short terminal_width() noexcept
 {
     struct winsize size {};

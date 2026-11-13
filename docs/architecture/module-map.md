@@ -1,9 +1,9 @@
 # Source structure and seams
 
 Shatter has three layers: Control, Mixer, and Backend. Platform-specific control
-service code is separate from platform-specific audio integration. The selected
-audio backend and platform service are still chosen at build time; command syntax,
-show formats, and backend capabilities are unchanged by this organization.
+service code is separate from platform-specific audio integration. The platform service is chosen at build time. Linux builds include both PipeWire
+and PulseAudio; Windows builds include WASAPI. The daemon detects the running
+audio server and restarts itself when the selected server changes.
 
 ## Header and source convention
 
@@ -16,6 +16,7 @@ src/
   control/
     cli.hpp / cli.cpp
     service.hpp / service.cpp
+    backend_watcher.hpp / backend_watcher.cpp
     platform/
       service.hpp
       linux/service.cpp
@@ -45,6 +46,10 @@ src/
   backend/
     iaudio_backend.hpp
     endpoint.hpp
+    selection.hpp / selection.cpp
+    providers.hpp
+    detection_linux.cpp
+    detection_windows.cpp
     unavailable_audio_backend.cpp
     pipewire/
       pipewire_backend.hpp / pipewire_backend.cpp
@@ -74,7 +79,8 @@ src/
 - Namespaces follow the layer: `shatter::control`, `shatter::mixer`, and
   `shatter::backend`. Nested mixer state/meter and control platform modules use
   corresponding nested namespaces.
-- Native SDK headers belong in `backend/<provider>/`, or in
+- Native SDK headers belong in `backend/<provider>/` and platform detection
+  implementations under `backend/`, or in
   `control/platform/<os>/` for service transport. Cross-layer interfaces contain
   no native SDK types.
 
@@ -86,14 +92,14 @@ enters `control::run_service()`.
 
 `control/service.cpp` runs the persistent command loop and dispatches the private
 local command protocol through `mixer::IControl`, created by
-`mixer::create_engine()`. It owns command parsing,
+`backend::create_engine(server.kind)`. It owns command parsing,
 reply framing, current/startup show tracking, and the stop sequence. It does not
 handle sample buffers or include native audio headers. The same command operations
 remain available to future control surfaces; OSC and MIDI files are placeholders,
 not implemented interfaces or a versioned public network API.
 
 `control/platform/service.hpp` is the OS service seam: accept/send/receive local
-commands, launch the detached process, and obtain terminal width. Its Linux
+commands, launch/restart the detached process, and obtain terminal width. Its Linux
 adapter uses a private Unix socket; its Windows adapter uses a per-user named
 pipe. These remain user-session processes, not new system-service integrations.
 
@@ -182,9 +188,10 @@ prototypes. Discovery IDs for transient streams are not persistent identities.
 
 CLI listing methods retain their previous text for compatibility. Future control
 surfaces can use structured enumeration through `IAudioBackend` without parsing
-those tables. The selected provider's factory now constructs
-`Engine<ConcreteBackend>` and returns `IControl`, rather than constructing a
-backend behind the old broad command interface.
+those tables. `backend/selection.cpp` selects a provider factory at runtime. Each factory
+constructs a compiled `Engine<ConcreteBackend>` specialization and returns
+`IControl`. Template specialization remains a compile-time operation; runtime
+selection chooses between those already compiled types.
 
 `PipeWireBackend` is consistently named with `PulseAudioBackend` and
 `WasapiBackend`. Its implementation is split by responsibility:
@@ -212,17 +219,36 @@ CMake expresses the layers as separate static targets:
 shatter (main)
   -> shatter_control
        -> shatter_control_platform (selected Linux/Windows adapter)
-       -> shatter_backend (selected audio adapter)
+       -> shatter_backend (all adapters for the platform)
             -> shatter_mixer
 ```
 
-Only the selected audio adapter receives its native audio SDK dependency.
-The compiled `shatter_mixer` library has no native audio SDK dependency and builds
-in the no-audio configuration too. Its portable controls, processor, and DSP do
+The backend target receives the platform's native audio SDK dependencies: both
+libpipewire and libpulse on Linux, and Windows audio libraries on Windows.
+The compiled `shatter_mixer` library has no native audio SDK dependency. Its portable controls, processor, and DSP do
 not depend on concrete adapters. The assembly template in `mixer/engine.hpp`
 knows the SDK-free `IAudioBackend` contract and is instantiated in the selected
 provider's factory; this is why the link graph has Backend depending on Mixer,
 while application commands enter the mixer engine first.
+
+`backend/detection_linux.cpp` makes bounded native protocol probes, preferring
+PipeWire over PulseAudio and disabling PulseAudio autospawn. It compares server
+cookies, rather than endpoint lists, to distinguish server instances. Windows
+tracks the Windows Audio service and its process ID. An unavailable server selects
+the no-audio adapter while the command service stays accessible.
+
+`control/backend_watcher.cpp` polls on a separate non-realtime thread once per
+second. A different selection must remain stable for two seconds, and the daemon
+must have run for at least five seconds, before it requests a restart. Device
+hotplug and default-device changes within the same server do not cause restarts.
+The watcher sends a private wake-up command without waiting for a reply. Only
+the daemon command thread saves the startup show, fades and stops the engine,
+and destroys native state and transport. Linux then executes `/proc/self/exe`
+in the same process, preserving systemd's main PID. Windows launches a replacement
+process. An explicit stop stops the watcher and never requests replacement.
+Existing show-loading and autosave rules apply; unsupported adapters cannot
+persist or restore mixer features they do not implement. Restart detection does
+not confer feature parity on PulseAudio or WASAPI.
 
 For PipeWire, the daemon main thread dispatches commands and performs file I/O.
 A separate PipeWire control-loop thread handles discovery and structural requests.
@@ -240,7 +266,12 @@ closed gates, and slot reuse. `engine_test.cpp` checks virtual control/discovery
 against the same concrete backend, shared controls, and discovery-only adapters
 without mixer/buffer stubs. These tests use an in-memory adapter without an audio
 SDK. `backend/contract_test.cpp` exercises pre-start discovery on the actual
-build-selected adapter. PipeWire playback/capture integration
+runtime-selected adapter. PipeWire playback/capture integration
 scripts cover the native-to-mixer path and persistence; PulseAudio integration
 covers its existing routing behavior. Windows lifecycle and installer checks
 remain in the Windows CI configuration.
+
+`backend_selection_test` verifies debounce, minimum lifetime, server replacement,
+and recovery without timed sleeps. `automatic_backend_restart` exercises one
+Linux binary through isolated PulseAudio and PipeWire servers, no-server recovery,
+same-provider replacement, show recovery, and explicit shutdown.

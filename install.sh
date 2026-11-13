@@ -3,17 +3,12 @@ set -eu
 
 project_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 platform=${SHATTER_PLATFORM:-AUTO}
-audio_backend=${SHATTER_AUDIO_BACKEND:-AUTO}
 platform_lower=$(printf '%s' "$platform" | tr '[:upper:]' '[:lower:]')
-backend_lower=$(printf '%s' "$audio_backend" | tr '[:upper:]' '[:lower:]')
 if [ "$platform_lower" = auto ]; then
     case "$(uname -s)" in
         MINGW*|MSYS*|CYGWIN*) platform_lower=windows ;;
         *) platform_lower=linux ;;
     esac
-fi
-if [ "$backend_lower" = auto ]; then
-    if [ "$platform_lower" = linux ]; then backend_lower=pipewire; else backend_lower=none; fi
 fi
 case "$platform_lower" in
     windows) default_prefix=${LOCALAPPDATA:-"$HOME/AppData/Local"}/Programs/Shatter ;;
@@ -64,12 +59,12 @@ if [ "$(id -u)" -ne 0 ] && [ -e "$build_dir" ]; then
     done
 fi
 
-if [ "$backend_lower" = pipewire ] &&
+if [ "$platform_lower" = linux ] &&
    { ! command -v pkg-config >/dev/null 2>&1 || ! pkg-config --exists libpipewire-0.3; }; then
     echo "PipeWire development files are required. On Fedora, install them with: sudo dnf install pipewire-devel" >&2
     exit 1
 fi
-if [ "$backend_lower" = pulseaudio ] &&
+if [ "$platform_lower" = linux ] &&
    { ! command -v pkg-config >/dev/null 2>&1 || ! pkg-config --exists libpulse; }; then
     echo "PulseAudio development files are required. On Fedora, install them with: sudo dnf install pulseaudio-libs-devel" >&2
     exit 1
@@ -77,7 +72,7 @@ fi
 
 cmake -S "$project_dir" -B "$build_dir" \
     -DBUILD_TESTING=OFF \
-    -DSHATTER_PLATFORM="$platform" -DSHATTER_AUDIO_BACKEND="$audio_backend" \
+    -DSHATTER_PLATFORM="$platform" \
     -DCMAKE_INSTALL_PREFIX="$install_prefix"
 cmake --build "$build_dir" --target shatter --config Release
 cmake --install "$build_dir" --config Release

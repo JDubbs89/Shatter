@@ -6,12 +6,15 @@ runtime_dir=$(mktemp -d)
 chmod 700 "$runtime_dir"
 trap '"$binary" stop >/dev/null 2>&1 || true; rm -rf "$runtime_dir"' EXIT HUP INT TERM
 export XDG_RUNTIME_DIR="$runtime_dir"
+export PIPEWIRE_RUNTIME_DIR="$runtime_dir"
+export PIPEWIRE_REMOTE=pipewire-0
+export PULSE_SERVER="unix:$runtime_dir/pulse/native"
 export XDG_CONFIG_HOME="$runtime_dir/config"
 
 "$binary" start
 status=$("$binary" status)
 case "$status" in
-    *"is running; audio-unavailable:"*"no audio backend is configured"*) ;;
+    *"is running; audio-unavailable:"*"no supported audio server is currently available"*) ;;
     *) echo "expected clear no-audio status, got: $status" >&2; exit 1 ;;
 esac
 
@@ -22,13 +25,13 @@ esac
 
 health=$($binary health)
 case "$health" in
-    *"Engine health: failed-open"*"no audio backend is configured"*"I/O latency: unavailable"*) ;;
+    *"Engine health: failed-open"*"no supported audio server is currently available"*"I/O latency: unavailable"*) ;;
     *) echo "expected failed-open health details, got: $health" >&2; exit 1 ;;
 esac
 
 inputs=$("$binary" --list-in)
 case "$inputs" in
-    *"no audio backend is configured"*) ;;
+    *"no supported audio server is currently available"*) ;;
     *) echo "expected clear no-audio input listing, got: $inputs" >&2; exit 1 ;;
 esac
 

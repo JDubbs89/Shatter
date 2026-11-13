@@ -153,7 +153,7 @@ public:
         mainloop_started_ = true;
 
         pa_threaded_mainloop_lock(mainloop_);
-        if (pa_context_connect(context_, nullptr, PA_CONTEXT_NOFLAGS, nullptr) < 0) {
+        if (pa_context_connect(context_, nullptr, PA_CONTEXT_NOAUTOSPAWN, nullptr) < 0) {
             error = context_error();
             pa_threaded_mainloop_unlock(mainloop_);
             stop_locked();
@@ -183,9 +183,11 @@ public:
             stop_locked();
             return false;
         }
-        while (!subscription.complete) pa_threaded_mainloop_wait(mainloop_);
+        while (!subscription.complete && pa_context_get_state(context_) == PA_CONTEXT_READY)
+            pa_threaded_mainloop_wait(mainloop_);
+        if (!subscription.complete) pa_operation_cancel(operation);
         pa_operation_unref(operation);
-        if (!subscription.succeeded) {
+        if (!subscription.complete || !subscription.succeeded) {
             error = context_error();
             pa_threaded_mainloop_unlock(mainloop_);
             stop_locked();
@@ -304,9 +306,11 @@ private:
             error = context_error();
             return false;
         }
-        while (!complete) pa_threaded_mainloop_wait(mainloop_);
+        while (!complete && pa_context_get_state(context_) == PA_CONTEXT_READY)
+            pa_threaded_mainloop_wait(mainloop_);
+        if (!complete) pa_operation_cancel(operation);
         pa_operation_unref(operation);
-        if (!succeeded) {
+        if (!complete || !succeeded) {
             error = query_error.empty() ? context_error() : query_error;
             return false;
         }

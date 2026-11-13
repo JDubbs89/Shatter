@@ -403,9 +403,9 @@ private:
 
 } // namespace shatter::backend
 
-namespace shatter::mixer {
-std::unique_ptr<IControl> create_engine()
+namespace shatter::backend {
+std::unique_ptr<mixer::IControl> create_wasapi_engine()
 {
-    return std::make_unique<Engine<backend::WasapiBackend>>();
+    return std::make_unique<mixer::Engine<WasapiBackend>>();
 }
-} // namespace shatter::mixer
+} // namespace shatter::backend

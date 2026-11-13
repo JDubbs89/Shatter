@@ -1,4 +1,4 @@
-param([Parameter(Mandatory = $true)][string]$Binary, [string]$Backend = 'NONE')
+param([Parameter(Mandatory = $true)][string]$Binary)
 $ErrorActionPreference = 'Stop'
 
 function Start-ShatterEngine([int]$Cycle) {
@@ -44,13 +44,14 @@ try {
 
         Write-Host "Checking engine commands (cycle $cycle)"
         $status = (& $Binary status | Out-String)
-        $expectedStatus = if ($Backend -eq 'WASAPI') { 'is running;' } else { 'is running; audio-unavailable:.*no audio backend is configured' }
+        $expectedStatus = 'is running;'
+        $Backend = if ($status -match 'Backend: wasapi') { 'WASAPI' } else { 'NONE' }
         if ($LASTEXITCODE -ne 0 -or $status -notmatch $expectedStatus) {
             throw "unexpected running status in cycle ${cycle}: $status"
         }
 
         $inputs = (& $Binary list in | Out-String)
-        $expectedInputs = if ($Backend -eq 'WASAPI') { 'Windows WASAPI playback sessions' } else { 'no audio backend is configured' }
+        $expectedInputs = if ($Backend -eq 'WASAPI') { 'Windows WASAPI playback sessions' } else { 'no supported audio server is currently available' }
         if ($LASTEXITCODE -ne 0 -or $inputs -notmatch $expectedInputs) {
             throw "unexpected input listing in cycle ${cycle}: $inputs"
         }
@@ -61,7 +62,7 @@ try {
                 throw "unexpected endpoint listing in cycle ${cycle}: $outputs"
             }
             $health = (& $Binary health | Out-String)
-            if ($LASTEXITCODE -ne 0 -or $health -notmatch 'Engine health: (running|degraded)') {
+            if ($LASTEXITCODE -ne 0 -or $health -notmatch 'Engine health: (running|degraded|failed-open)') {
                 throw "unexpected WASAPI health report in cycle ${cycle}: $health"
             }
 

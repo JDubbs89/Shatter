@@ -547,21 +547,27 @@ std::string PipeWireBackend::health_status() const
 
 void PipeWireBackend::pause_streams_for_shutdown() noexcept
 {
-    for (auto& stream : playback_streams_) {
-        if (stream.sink == nullptr) continue;
-        pw_stream_set_active(stream.sink, false);
-        pw_stream_flush(stream.sink, false);
-    }
-    for (auto& channel : capture_channels_) {
-        if (channel.source_stream == nullptr) continue;
-        pw_stream_set_active(channel.source_stream, false);
-        pw_stream_flush(channel.source_stream, false);
-    }
-    for (auto& output : output_channels_) {
-        if (output.stream == nullptr) continue;
-        pw_stream_set_active(output.stream, false);
-        pw_stream_flush(output.stream, false);
-    }
+    if (main_loop_ == nullptr || !loop_thread_.joinable()) return;
+    pw_loop_invoke(pw_main_loop_get_loop(main_loop_),
+        [](spa_loop*, bool, std::uint32_t, const void*, std::size_t, void* data) -> int {
+            auto& backend = *static_cast<PipeWireBackend*>(data);
+            for (auto& stream : backend.playback_streams_) {
+                if (stream.sink == nullptr) continue;
+                pw_stream_set_active(stream.sink, false);
+                pw_stream_flush(stream.sink, false);
+            }
+            for (auto& channel : backend.capture_channels_) {
+                if (channel.source_stream == nullptr) continue;
+                pw_stream_set_active(channel.source_stream, false);
+                pw_stream_flush(channel.source_stream, false);
+            }
+            for (auto& output : backend.output_channels_) {
+                if (output.stream == nullptr) continue;
+                pw_stream_set_active(output.stream, false);
+                pw_stream_flush(output.stream, false);
+            }
+            return 0;
+        }, 0, nullptr, 0, true, this);
 }
 
 namespace {
@@ -884,6 +890,8 @@ void PipeWireBackend::cleanup()
     if (loop_thread_.joinable()) {
         loop_thread_.join();
     }
+    // The loop thread has stopped. Own its context during native teardown.
+    if (main_loop_ != nullptr) pw_loop_enter(pw_main_loop_get_loop(main_loop_));
     for (auto& channel : capture_channels_)
         if (channel.in_use) destroy_capture_channel(channel);
     for (auto& stream : playback_streams_) {
@@ -928,6 +936,7 @@ void PipeWireBackend::cleanup()
         context_ = nullptr;
     }
     if (main_loop_ != nullptr) {
+        pw_loop_leave(pw_main_loop_get_loop(main_loop_));
         pw_main_loop_destroy(main_loop_);
         main_loop_ = nullptr;
     }

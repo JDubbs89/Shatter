@@ -55,6 +55,16 @@ TEST(PlatformControlTest, ControlTransportRoundTripsAndReportsTerminalWidth)
     EXPECT_TRUE(server_error.empty()) << server_error;
     EXPECT_GT(shatter::control::platform::terminal_width(), 0);
 
+    std::string notification;
+    std::thread receiver([&] {
+        auto connection = server->accept(server_error);
+        if (connection) connection->receive(notification, server_error);
+    });
+    const bool notified = shatter::control::platform::notify_control("BACKEND-RESTART", error);
+    receiver.join();
+    EXPECT_TRUE(notified) << error;
+    EXPECT_EQ(notification, "BACKEND-RESTART");
+
 #if !defined(_WIN32)
     server.reset();
     std::filesystem::remove_all(runtime_dir);

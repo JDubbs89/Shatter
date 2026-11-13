@@ -4,9 +4,27 @@ set -eu
 binary=$1
 runtime_dir=$(mktemp -d)
 chmod 700 "$runtime_dir"
-trap '"$binary" stop >/dev/null 2>&1 || true; rm -rf "$runtime_dir"' EXIT HUP INT TERM
+pipewire_pid=
+cleanup() {
+    "$binary" stop >/dev/null 2>&1 || true
+    if [ -n "$pipewire_pid" ]; then kill "$pipewire_pid" 2>/dev/null || true; wait "$pipewire_pid" 2>/dev/null || true; fi
+    rm -rf "$runtime_dir"
+}
+trap cleanup EXIT HUP INT TERM
 export XDG_RUNTIME_DIR="$runtime_dir"
+export PIPEWIRE_RUNTIME_DIR="$runtime_dir"
+export PIPEWIRE_REMOTE=pipewire-0
+export PULSE_SERVER="unix:$runtime_dir/pulse/native"
 export XDG_CONFIG_HOME="$runtime_dir/config"
+
+pipewire >"$runtime_dir/pipewire.log" 2>&1 &
+pipewire_pid=$!
+ready=0
+for attempt in $(seq 1 50); do
+    if pw-cli info 0 >/dev/null 2>&1; then ready=1; break; fi
+    sleep 0.1
+done
+if [ "$ready" -ne 1 ]; then cat "$runtime_dir/pipewire.log" >&2; exit 1; fi
 
 stopped=$($binary status)
 case "$stopped" in
