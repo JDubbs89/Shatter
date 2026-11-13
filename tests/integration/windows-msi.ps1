@@ -60,7 +60,8 @@ function Get-MsiProperty([string]$PackagePath, [string]$PropertyName) {
         $database = $installer.OpenDatabase($PackagePath, 0)
         $query = 'SELECT `Value` FROM `Property` WHERE `Property` = ''{0}''' -f $PropertyName
         $view = $database.OpenView($query)
-        $view.Execute()
+        # COM's empty result must not become an extra function output value.
+        [void]$view.Execute()
         $record = $view.Fetch()
         return $record.StringData(1)
     }
