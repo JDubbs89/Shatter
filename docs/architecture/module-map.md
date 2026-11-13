@@ -1,49 +1,184 @@
-# Module map
+# Source structure and seams
 
-This map distinguishes active implementations from planned modules. Active modules are the current ownership points; planned modules describe follow-up extraction work, not stable interfaces.
+Shatter has three layers: Control, Mixer, and Backend. Platform-specific control
+service code is separate from platform-specific audio integration. The selected
+audio backend and platform service are still chosen at build time; command syntax,
+show formats, and backend capabilities are unchanged by this organization.
 
-## Process and API
+## Header and source convention
 
-- `src/main.cpp`: executable entry point.
-- `src/app/supervisor.cpp`: command-line syntax, engine process lifecycle, and user-facing command output.
-- `src/api/server.cpp`: local command dispatch and protocol handling. `src/platform/` owns the platform-specific control transport; the command protocol is private to the executable, and a versioned JSON-RPC API remains planned.
-- `src/api/osc.cpp`: optional P1 OSC control surface.
-- `src/control/midi.cpp`: optional P1 MIDI and hotkey control.
+This repository builds an executable, not an installed C++ SDK. All project
+headers live under `src/`, beside the implementation they describe:
 
-## Audio and PipeWire
+```text
+src/
+  main.cpp
+  control/
+    cli.hpp / cli.cpp
+    service.hpp / service.cpp
+    platform/
+      service.hpp
+      linux/service.cpp
+      windows/service.cpp
+    surfaces/
+      midi.cpp
+      osc.cpp
+  mixer/
+    model.hpp
+    processor.hpp / processor.cpp
+    dsp.hpp / dsp.cpp
+    audio_ring.hpp
+    realtime_access_gate.hpp
+    health.hpp
+    identifiers.hpp
+    runtime_profiler.hpp
+    meter/meter_bus.hpp / meter_bus.cpp
+    state/store.hpp / store.cpp
+    state/scenes.cpp
+    fx_host.cpp
+    routing_rules.cpp
+  backend/
+    audio_backend.hpp
+    unavailable_audio_backend.cpp
+    pipewire/
+      pipewire_backend.hpp / pipewire_backend.cpp
+      factory.cpp
+      audio_callbacks.cpp
+      registry.cpp
+      routing.cpp
+      virtual_devices.cpp
+    pulseaudio/
+      pulseaudio_backend.cpp
+      pulseaudio_client.hpp / pulseaudio_client.cpp
+      pulseaudio_types.hpp
+    wasapi/
+      wasapi_backend.cpp
+      wasapi_types.hpp
+```
 
-- `src/engine/pipewire_engine.cpp`: PipeWire connection and main-loop lifecycle, app/stream/capture channel state, config application, list presentation, and profiling. It remains the largest active module; channel state and table rendering are coupled to the engine and need an explicit data interface before moving.
-- `src/engine/pulseaudio_backend.cpp`: PulseAudio-protocol backend for listing playback streams and sinks and routing selected apps, including streams created after assignment; `pulseaudio_client.cpp` owns the libpulse connection and event seam. Capture, persistent shows, gain, mute, and custom mixing remain unsupported.
-- `src/engine/wasapi_backend.cpp`: Windows WASAPI discovery prototype for active playback sessions and endpoints; app routing and the PipeWire mixer features remain unsupported until follow-up work.
-- `src/engine/mixer_node.cpp`: realtime input fan-out and per-output mixing callbacks. Callbacks must not block, allocate, or lock.
-- `src/engine/dsp.cpp`: planned home for reusable channel, send, bus, and matrix processing that can be expressed independently of PipeWire buffers.
-- `src/engine/fx_host.cpp`: future P1 LV2 host; not part of the initial routing and mixing proof.
-- `src/meter/meter_bus.cpp`: realtime-safe meter collection and publication to non-realtime clients.
-- `src/pw/core.cpp`: PipeWire registry callbacks and observed node/link graph updates. Connection lifecycle remains in `PipeWireEngine`.
-- `src/pw/link_manager.cpp`: observed link state, Shatter output-to-sink bookkeeping, and control-loop operations for creating, deleting, and routing output channels.
-- `src/pw/virtual_devices.cpp`: app-facing virtual playback stream registration and output stream lifecycle. Capture endpoint lifecycle remains in `PipeWireEngine`.
-- `src/pw/rule_engine.cpp`: planned direction-specific app matching and routing decisions.
+- Use matching snake_case basenames for `.hpp`/`.cpp` pairs.
+- Include project headers relative to `src/`, for example
+  `#include "mixer/processor.hpp"` or
+  `#include "backend/pipewire/pipewire_backend.hpp"`. Do not use relative `../`
+  includes or create a second header tree.
+- A header-only module has only an `.hpp`. A class used entirely within one
+  translation unit stays in that `.cpp`; it does not need a redundant header.
+  PulseAudio and WASAPI backend classes currently follow this rule.
+- Namespaces follow the layer: `shatter::control`, `shatter::mixer`, and
+  `shatter::backend`. Nested mixer state/meter and control platform modules use
+  corresponding nested namespaces.
+- Native SDK headers belong in `backend/<provider>/`, or in
+  `control/platform/<os>/` for service transport. Cross-layer interfaces contain
+  no native SDK types.
 
-## State
+## Control
 
-- `src/state/store.cpp`: active show/config path validation, parsing, serialization, and atomic replacement. The engine snapshots live settings and applies loaded settings; file format concerns stay here.
-- `src/state/scenes.cpp`: future scene support; scenes are deferred from the initial release scope.
+`control/cli.cpp` parses arguments, sends commands, and manages the daemon
+lifecycle. `main.cpp` only enters the CLI. The existing `--engine` process mode
+enters `control::run_service()`.
 
-## Tests and packaging
+`control/service.cpp` runs the persistent command loop and dispatches the private
+local command protocol through `backend::AudioBackend`. It owns command parsing,
+reply framing, current/startup show tracking, and the stop sequence. It does not
+handle sample buffers or include native audio headers. The same command operations
+remain available to future control surfaces; OSC and MIDI files are placeholders,
+not implemented interfaces or a versioned public network API.
 
-- `tests/unit/` and `tests/integration/`: unit and PipeWire/WirePlumber integration coverage.
-- `packaging/systemd/`: planned user-session service packaging.
-- `config/`: examples and documentation for user-editable rules/configuration. The schema is intentionally not invented in this scaffold.
+`control/platform/service.hpp` is the OS service seam: accept/send/receive local
+commands, launch the detached process, and obtain terminal width. Its Linux
+adapter uses a private Unix socket; its Windows adapter uses a per-user named
+pipe. These remain user-session processes, not new system-service integrations.
 
-## Remaining extraction work
+## Mixer
 
-1. Move channel state and list presentation behind explicit engine data interfaces; keep config file parsing and serialization in `state::Store`.
-2. Move capture endpoint lifecycle and route reconciliation behind explicit interfaces; current PipeWire graph callbacks and output management live under `src/pw`.
-3. Move reusable audio mixing math from the PipeWire callbacks into `dsp.cpp`, leaving buffer acquisition and release in `mixer_node.cpp`.
-4. Keep CLI parsing in `supervisor.cpp`, command dispatch in `api/server.cpp`, and platform lifecycle/control transport in `src/platform/`; avoid adding persistence or file-format logic back to either module.
+`mixer/model.hpp` defines portable application, playback-stream, capture, and
+output state, routing masks, gain/mute targets, smoothing state, meters, and audio
+rings. It contains no PipeWire, libpulse, or Windows types.
 
-## Early proof points
+`mixer/processor.hpp` is the sample-processing seam. Its implementation owns:
 
-1. Verify PipeWire/WirePlumber routing behavior for both playback and capture stream restoration.
-2. Prototype minimal mixing and structural reconfiguration without realtime allocations, locks, or xruns.
-3. Prove the daemon fails open to ordinary PipeWire routing after failure; this is a gate before expanding the mixer.
+- Playback stream gain/mute and fan-out to independent output rings.
+- Summing streams into application channels and applying application gain/mute.
+- Explicit stream sends and physical capture contributions.
+- Output gain/mute, shutdown fades, metering, and mixer xrun accounting.
+
+The processor accepts interleaved stereo float samples at the existing 48 kHz
+format. The adapter supplies buffers and schedules calls; the processor does not
+create threads or control native endpoints. This preserves the existing callback
+scheduling and mixing order.
+
+`ProcessingState` borrows stable channel records and slot views. The adapter binds
+these views before starting callbacks and owns their lifetime. PipeWire endpoint
+records extend portable records with native handles so existing slot reuse and
+callback userdata remain stable. The processor only sees the portable records.
+Adapters must preserve single-producer/single-consumer ring ownership, publish
+atomic controls, and close/wait/reopen the relevant gates before teardown or reuse.
+Input callbacks snapshot output generations before acquiring native buffers;
+this prevents an old buffer entering a reused output slot. Audio processing does
+not allocate, lock, or wait.
+
+`dsp.cpp` contains sample math; `meter/` publishes peak/RMS windows atomically.
+`state/store.cpp` handles show paths, validation, parsing, serialization, and file
+replacement. Native adapters still snapshot/apply settings while coordinating
+endpoint lifecycle. `fx_host.cpp`, `routing_rules.cpp`, and `state/scenes.cpp`
+remain deferred modules. General mix buses, matrices, and effects are not added
+by this refactor; future implementations belong in this layer.
+
+## Backend
+
+`backend/audio_backend.hpp` retains the existing command-facing adapter contract
+and build-selected factory. Each native implementation resolves its selectors,
+translates available operations into mixer controls/native routing, and reports
+unsupported features as before. Control includes this contract, never a concrete
+backend header.
+
+`PipeWireBackend` is consistently named with `PulseAudioBackend` and
+`WasapiBackend`. Its implementation is split by responsibility:
+
+| File | Responsibility |
+| --- | --- |
+| `pipewire_backend.cpp` | Connection/control-loop lifecycle, command translation, discovery-to-channel reconciliation, show coordination, listings and native diagnostics |
+| `registry.cpp` | Observed nodes, ports, links, metadata, and removal callbacks |
+| `virtual_devices.cpp` | Playback ingress sinks and output endpoint lifecycle |
+| `routing.cpp` | Control-loop requests, native links, output assignments, and applying shows to discovered endpoints |
+| `audio_callbacks.cpp` | Acquire/release PipeWire buffers, decode native buffer layout, query native timing, and call the portable processor |
+| `factory.cpp` | Construct the selected adapter |
+
+PulseAudio retains discovery and playback stream routing, including its libpulse
+connection and routing worker. WASAPI retains synchronous session/endpoint
+discovery. Neither gains custom mixing or other previously unsupported features.
+The unavailable adapter retains the explicit no-audio behavior.
+
+## Build dependencies and execution
+
+CMake expresses the layers as separate static targets:
+
+```text
+shatter (main)
+  -> shatter_control
+       -> shatter_control_platform (selected Linux/Windows adapter)
+       -> shatter_backend (selected audio adapter)
+            -> shatter_mixer
+```
+
+Only the selected audio adapter receives its native audio SDK dependency.
+`shatter_mixer` has no dependency on Control, Backend, or an audio SDK and builds
+in the no-audio configuration too. The command-facing contract remains broad to
+preserve existing backend behavior; a future common command model can replace
+that contract without changing the portable processing seam.
+
+For PipeWire, the daemon main thread dispatches commands and performs file I/O.
+A separate PipeWire control-loop thread handles discovery and structural requests.
+PipeWire-managed realtime threads run native buffer callbacks and call the mixer.
+Meter reads use atomic publication; there is no dedicated meter thread. PulseAudio
+uses its own threaded mainloop and routing worker. Windows service transport is
+independent of WASAPI discovery.
+
+## Verification
+
+Existing unit and integration coverage remains under `tests/`. The portable
+processor has direct sample-to-sample coverage in `src/mixer/processor_test.cpp`,
+which builds without a native audio SDK. PipeWire playback/capture integration
+scripts cover the native-to-mixer path and persistence; PulseAudio integration
+covers its existing routing behavior. Windows lifecycle and installer checks
+remain in the Windows CI configuration.

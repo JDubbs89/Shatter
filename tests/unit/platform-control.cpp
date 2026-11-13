@@ -1,4 +1,4 @@
-#include "shatter/platform/platform.hpp"
+#include "control/platform/service.hpp"
 
 #include <gtest/gtest.h>
 
@@ -27,10 +27,10 @@ TEST(PlatformControlTest, ControlTransportRoundTripsAndReportsTerminalWidth)
 #endif
 
     std::string error;
-    auto server = shatter::platform::listen_for_control(error);
+    auto server = shatter::control::platform::listen_for_control(error);
     if (!server) {
 #if defined(_WIN32)
-        EXPECT_TRUE(shatter::platform::request_control("PING").starts_with("OK running"));
+        EXPECT_TRUE(shatter::control::platform::request_control("PING").starts_with("OK running"));
         return;
 #endif
         FAIL() << "could not create control listener: " << error;
@@ -49,11 +49,11 @@ TEST(PlatformControlTest, ControlTransportRoundTripsAndReportsTerminalWidth)
         connection->send("OK platform transport passed\n.\n", server_error);
     });
 
-    const std::string response = shatter::platform::request_control("PING");
+    const std::string response = shatter::control::platform::request_control("PING");
     worker.join();
     EXPECT_EQ(response, "OK platform transport passed\n");
     EXPECT_TRUE(server_error.empty()) << server_error;
-    EXPECT_GT(shatter::platform::terminal_width(), 0);
+    EXPECT_GT(shatter::control::platform::terminal_width(), 0);
 
 #if !defined(_WIN32)
     server.reset();

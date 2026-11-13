@@ -86,68 +86,68 @@ if(BUILD_TESTING)
     find_package(GTest CONFIG REQUIRED)
 endif()
 
-set(SHATTER_SOURCES
-    src/main.cpp
-    src/api/osc.cpp
-    src/api/server.cpp
-    src/app/supervisor.cpp
-    src/control/midi.cpp
-    src/engine/dsp.cpp
-    src/engine/fx_host.cpp
-    src/meter/meter_bus.cpp
-    src/state/store.cpp
-    src/state/scenes.cpp
+# Each layer is a separate target. Only shatter_backend receives native audio
+# SDK include paths; shatter_mixer builds without any audio SDK or control code.
+add_library(shatter_mixer STATIC
+    src/mixer/dsp.cpp
+    src/mixer/processor.cpp
+    src/mixer/fx_host.cpp
+    src/mixer/routing_rules.cpp
+    src/mixer/meter/meter_bus.cpp
+    src/mixer/state/store.cpp
+    src/mixer/state/scenes.cpp
 )
-
-if(SHATTER_AUDIO_BACKEND STREQUAL "PIPEWIRE")
-    list(APPEND SHATTER_SOURCES
-        src/engine/mixer_node.cpp
-        src/engine/pipewire_engine.cpp
-        src/engine/audio_backend.cpp
-        src/pw/core.cpp
-        src/pw/link_manager.cpp
-        src/pw/rule_engine.cpp
-        src/pw/virtual_devices.cpp
-    )
-elseif(SHATTER_AUDIO_BACKEND STREQUAL "PULSEAUDIO")
-    list(APPEND SHATTER_SOURCES
-        src/engine/pulseaudio_backend.cpp
-        src/engine/pulseaudio_client.cpp
-    )
-elseif(SHATTER_AUDIO_BACKEND STREQUAL "WASAPI")
-    list(APPEND SHATTER_SOURCES src/engine/wasapi_backend.cpp)
-else()
-    list(APPEND SHATTER_SOURCES src/engine/unavailable_audio_backend.cpp)
-endif()
-
-add_executable(shatter ${SHATTER_SOURCES})
+target_include_directories(shatter_mixer PUBLIC src)
 
 if(SHATTER_PLATFORM STREQUAL "LINUX")
-    add_library(shatter_platform STATIC src/platform/linux.cpp)
+    add_library(shatter_control_platform STATIC src/control/platform/linux/service.cpp)
 else()
-    add_library(shatter_platform STATIC src/platform/windows.cpp)
+    add_library(shatter_control_platform STATIC src/control/platform/windows/service.cpp)
+    target_link_libraries(shatter_control_platform PRIVATE advapi32)
 endif()
-target_include_directories(shatter_platform PUBLIC include)
-target_compile_features(shatter_platform PUBLIC cxx_std_20)
-if(SHATTER_PLATFORM STREQUAL "WINDOWS")
-    target_link_libraries(shatter_platform PUBLIC advapi32)
-endif()
+target_include_directories(shatter_control_platform PUBLIC src)
 
-target_include_directories(shatter PRIVATE include)
-target_include_directories(shatter PRIVATE src/engine)
-target_compile_features(shatter PRIVATE cxx_std_20)
-target_link_libraries(shatter PRIVATE shatter_platform)
 if(SHATTER_AUDIO_BACKEND STREQUAL "PIPEWIRE")
-    target_link_libraries(shatter PRIVATE PkgConfig::PIPEWIRE)
+    add_library(shatter_backend STATIC
+        src/backend/pipewire/factory.cpp
+        src/backend/pipewire/pipewire_backend.cpp
+        src/backend/pipewire/audio_callbacks.cpp
+        src/backend/pipewire/registry.cpp
+        src/backend/pipewire/routing.cpp
+        src/backend/pipewire/virtual_devices.cpp
+    )
+    target_link_libraries(shatter_backend PRIVATE PkgConfig::PIPEWIRE)
 elseif(SHATTER_AUDIO_BACKEND STREQUAL "PULSEAUDIO")
-    target_link_libraries(shatter PRIVATE PkgConfig::PULSEAUDIO)
+    add_library(shatter_backend STATIC
+        src/backend/pulseaudio/pulseaudio_backend.cpp
+        src/backend/pulseaudio/pulseaudio_client.cpp
+    )
+    target_link_libraries(shatter_backend PRIVATE PkgConfig::PULSEAUDIO)
 elseif(SHATTER_AUDIO_BACKEND STREQUAL "WASAPI")
-    target_link_libraries(shatter PRIVATE ole32 propsys)
+    add_library(shatter_backend STATIC src/backend/wasapi/wasapi_backend.cpp)
+    target_link_libraries(shatter_backend PRIVATE ole32 propsys)
+else()
+    add_library(shatter_backend STATIC src/backend/unavailable_audio_backend.cpp)
 endif()
+target_link_libraries(shatter_backend PUBLIC shatter_mixer)
 
-if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    target_compile_options(shatter PRIVATE -Wall -Wextra -Wpedantic)
-endif()
+add_library(shatter_control STATIC
+    src/control/cli.cpp
+    src/control/service.cpp
+    src/control/surfaces/osc.cpp
+    src/control/surfaces/midi.cpp
+)
+target_link_libraries(shatter_control PUBLIC shatter_backend shatter_control_platform)
+
+add_executable(shatter src/main.cpp)
+target_link_libraries(shatter PRIVATE shatter_control)
+
+foreach(_target shatter shatter_control shatter_control_platform shatter_mixer shatter_backend)
+    target_compile_features(${_target} PUBLIC cxx_std_20)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(${_target} PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+endforeach()
 
 install(TARGETS shatter RUNTIME DESTINATION bin)
 if(SHATTER_PLATFORM STREQUAL "LINUX")
@@ -193,11 +193,11 @@ endif()
 
 if(BUILD_TESTING)
     add_executable(platform_control_test tests/unit/platform-control.cpp)
-    target_link_libraries(platform_control_test PRIVATE shatter_platform GTest::gtest_main)
+    target_link_libraries(platform_control_test PRIVATE shatter_control_platform GTest::gtest_main)
     add_test(NAME platform_control COMMAND platform_control_test)
     set_tests_properties(platform_control PROPERTIES TIMEOUT 5 RUN_SERIAL TRUE)
     add_executable(wasapi_selection_test tests/unit/wasapi-selection.cpp)
-    target_include_directories(wasapi_selection_test PRIVATE src/engine)
+    target_include_directories(wasapi_selection_test PRIVATE src)
     target_compile_features(wasapi_selection_test PRIVATE cxx_std_20)
     target_link_libraries(wasapi_selection_test PRIVATE GTest::gtest_main)
     add_test(NAME wasapi_selection COMMAND wasapi_selection_test)
@@ -217,7 +217,7 @@ if(BUILD_TESTING)
     endif()
     if(SHATTER_AUDIO_BACKEND STREQUAL "PULSEAUDIO")
         add_executable(pulseaudio_selection_test tests/unit/pulseaudio-selection.cpp)
-        target_include_directories(pulseaudio_selection_test PRIVATE src/engine)
+        target_include_directories(pulseaudio_selection_test PRIVATE src)
         target_compile_features(pulseaudio_selection_test PRIVATE cxx_std_20)
         target_link_libraries(pulseaudio_selection_test PRIVATE GTest::gtest_main)
         add_test(NAME pulseaudio_selection COMMAND pulseaudio_selection_test)
@@ -247,34 +247,38 @@ if(BUILD_TESTING)
             set_tests_properties(windows_cli_lifecycle PROPERTIES TIMEOUT 20 RUN_SERIAL TRUE)
         endif()
     endif()
+    add_executable(mixer_processor_test src/mixer/processor_test.cpp)
+    target_link_libraries(mixer_processor_test PRIVATE shatter_mixer GTest::gtest_main)
+    add_test(NAME mixer_processor COMMAND mixer_processor_test)
+
     add_executable(audio_ring_test tests/unit/audio-ring.cpp)
-    target_include_directories(audio_ring_test PRIVATE include)
+    target_include_directories(audio_ring_test PRIVATE src)
     target_compile_features(audio_ring_test PRIVATE cxx_std_20)
     target_link_libraries(audio_ring_test PRIVATE GTest::gtest_main)
     add_test(NAME audio_ring COMMAND audio_ring_test)
 
-    add_executable(dsp_test src/engine/dsp.cpp tests/unit/dsp.cpp)
-    target_include_directories(dsp_test PRIVATE include)
+    add_executable(dsp_test tests/unit/dsp.cpp)
+    target_include_directories(dsp_test PRIVATE src)
     target_compile_features(dsp_test PRIVATE cxx_std_20)
-    target_link_libraries(dsp_test PRIVATE GTest::gtest_main)
+    target_link_libraries(dsp_test PRIVATE shatter_mixer GTest::gtest_main)
     add_test(NAME dsp COMMAND dsp_test)
 
-    add_executable(meter_test src/meter/meter_bus.cpp tests/unit/meter.cpp)
-    target_include_directories(meter_test PRIVATE include)
+    add_executable(meter_test tests/unit/meter.cpp)
+    target_include_directories(meter_test PRIVATE src)
     target_compile_features(meter_test PRIVATE cxx_std_20)
-    target_link_libraries(meter_test PRIVATE GTest::gtest_main)
+    target_link_libraries(meter_test PRIVATE shatter_mixer GTest::gtest_main)
     add_test(NAME meter COMMAND meter_test)
 
     add_executable(engine_health_test tests/unit/engine-health.cpp)
-    target_include_directories(engine_health_test PRIVATE include)
+    target_include_directories(engine_health_test PRIVATE src)
     target_compile_features(engine_health_test PRIVATE cxx_std_20)
     target_link_libraries(engine_health_test PRIVATE GTest::gtest_main)
     add_test(NAME engine_health COMMAND engine_health_test)
 
-    add_executable(state_store_test src/state/store.cpp tests/unit/state-store.cpp)
-    target_include_directories(state_store_test PRIVATE include)
+    add_executable(state_store_test tests/unit/state-store.cpp)
+    target_include_directories(state_store_test PRIVATE src)
     target_compile_features(state_store_test PRIVATE cxx_std_20)
-    target_link_libraries(state_store_test PRIVATE GTest::gtest_main)
+    target_link_libraries(state_store_test PRIVATE shatter_mixer GTest::gtest_main)
     add_test(NAME state_store COMMAND state_store_test)
 
     if(SHATTER_AUDIO_BACKEND STREQUAL "PIPEWIRE")

@@ -1,6 +1,6 @@
-#include "shatter/app/supervisor.hpp"
+#include "control/cli.hpp"
 
 int main(int argc, char** argv)
 {
-    return shatter::app::run_cli(argc, argv);
+    return shatter::control::run_cli(argc, argv);
 }

@@ -1,5 +1,5 @@
-#include "shatter/engine/health.hpp"
-#include "shatter/engine/identifiers.hpp"
+#include "mixer/health.hpp"
+#include "mixer/identifiers.hpp"
 
 #include <gtest/gtest.h>
 
@@ -7,8 +7,8 @@
 
 TEST(EngineHealthTest, DistinguishesFailedOpenDegradedAndRunning)
 {
-    using shatter::engine::HealthState;
-    using shatter::engine::health_state;
+    using shatter::mixer::HealthState;
+    using shatter::mixer::health_state;
 
     EXPECT_EQ(health_state(false, false, 0), HealthState::failed_open);
     EXPECT_EQ(health_state(true, false, 0), HealthState::degraded);
@@ -18,7 +18,7 @@ TEST(EngineHealthTest, DistinguishesFailedOpenDegradedAndRunning)
 
 TEST(EngineHealthTest, XrunCountersReportEventsAndAffectedFrames)
 {
-    shatter::engine::XrunCounters counters;
+    shatter::mixer::XrunCounters counters;
     EXPECT_EQ(counters.snapshot().input_overrun_events, 0);
 
     counters.record_input_overrun(16);
@@ -35,8 +35,8 @@ TEST(EngineHealthTest, XrunCountersReportEventsAndAffectedFrames)
 
 TEST(EngineHealthTest, HealthStateHasStableUserFacingNames)
 {
-    using shatter::engine::HealthState;
-    using shatter::engine::health_state_name;
+    using shatter::mixer::HealthState;
+    using shatter::mixer::health_state_name;
 
     EXPECT_EQ(std::string(health_state_name(HealthState::running)), "running");
     EXPECT_EQ(std::string(health_state_name(HealthState::degraded)), "degraded");
@@ -45,7 +45,7 @@ TEST(EngineHealthTest, HealthStateHasStableUserFacingNames)
 
 TEST(EngineHealthTest, ApplicationInputCaptureIdentitiesIncludeApplicationAndNode)
 {
-    using shatter::engine::stable_application_input_identity;
+    using shatter::mixer::stable_application_input_identity;
 
     const auto discord = stable_application_input_identity(
         "com.discordapp.Discord", "discord", "Discord", "Discord Microphone Input Capture");

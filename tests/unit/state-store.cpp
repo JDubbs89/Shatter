@@ -1,4 +1,4 @@
-#include "shatter/state/store.hpp"
+#include "mixer/state/store.hpp"
 
 #include <gtest/gtest.h>
 
@@ -42,8 +42,8 @@ TEST(StateStoreTest, VersionTwoShowsLoadWithExistingDeviceBindingMeaning)
              << "C 1 \"shatter.output.1\"\n";
     }
 
-    shatter::state::Store store(directory.path());
-    shatter::state::Show show;
+    shatter::mixer::state::Store store(directory.path());
+    shatter::mixer::state::Show show;
     std::string error;
     ASSERT_TRUE(store.load("legacy", show, error)) << error;
     ASSERT_EQ(show.outputs.size(), 1);
@@ -63,8 +63,8 @@ TEST(StateStoreTest, VersionOneShowsRemainReadableWithoutNewerRoutingState)
              << "S \"app-name:org.example.Player\" \"Music\" \"Music\" -6 1\n";
     }
 
-    shatter::state::Store store(directory.path());
-    shatter::state::Show show;
+    shatter::mixer::state::Store store(directory.path());
+    shatter::mixer::state::Show show;
     std::string error;
     ASSERT_TRUE(store.load("legacy-v1", show, error)) << error;
     ASSERT_EQ(show.apps.size(), 1);
@@ -77,15 +77,15 @@ TEST(StateStoreTest, VersionOneShowsRemainReadableWithoutNewerRoutingState)
 TEST(StateStoreTest, ShowsSaveBackendNeutralDeviceAndCaptureIdentities)
 {
     TemporaryDirectory directory;
-    shatter::state::Store store(directory.path());
-    shatter::state::Show show;
+    shatter::mixer::state::Store store(directory.path());
+    shatter::mixer::state::Show show;
     show.capture_source_identity = "device:serial:mic-7";
     show.outputs.push_back({1, "shatter.output.1", "Monitor",
         {{"device:serial:headphones-2", "Studio Headphones"}}});
     std::string error;
 
     ASSERT_TRUE(store.save("portable", show, error)) << error;
-    shatter::state::Show loaded;
+    shatter::mixer::state::Show loaded;
     ASSERT_TRUE(store.load("portable", loaded, error)) << error;
     EXPECT_EQ(loaded.capture_source_identity, "device:serial:mic-7");
     ASSERT_EQ(loaded.outputs.size(), 1);
@@ -102,8 +102,8 @@ TEST(StateStoreTest, ShowsSaveBackendNeutralDeviceAndCaptureIdentities)
 TEST(StateStoreTest, ShowControlStateRoundTripsForOutputAndCaptureChannels)
 {
     TemporaryDirectory directory;
-    shatter::state::Store store(directory.path());
-    shatter::state::Show show;
+    shatter::mixer::state::Store store(directory.path());
+    shatter::mixer::state::Show show;
     show.outputs.push_back({2, "shatter.output.2", "Headphones", {}, -9.5F, true});
     show.capture_gain_db = -18.0F;
     show.capture_muted = true;
@@ -112,7 +112,7 @@ TEST(StateStoreTest, ShowControlStateRoundTripsForOutputAndCaptureChannels)
     std::string error;
 
     ASSERT_TRUE(store.save("controls", show, error)) << error;
-    shatter::state::Show loaded;
+    shatter::mixer::state::Show loaded;
     ASSERT_TRUE(store.load("controls", loaded, error)) << error;
     ASSERT_EQ(loaded.outputs.size(), 1);
     EXPECT_EQ(loaded.outputs[0].gain_db, -9.5F);
@@ -133,8 +133,8 @@ TEST(StateStoreTest, VersionThreeShowsMigrateWithNeutralChannelControls)
              << "C 1 \"shatter.output.1\"\n"
              << "M \"device:serial:mic\"\n";
     }
-    shatter::state::Store store(directory.path());
-    shatter::state::Show loaded;
+    shatter::mixer::state::Store store(directory.path());
+    shatter::mixer::state::Show loaded;
     std::string error;
     ASSERT_TRUE(store.load("v3", loaded, error)) << error;
     ASSERT_EQ(loaded.outputs.size(), 1);
@@ -153,8 +153,8 @@ TEST(StateStoreTest, InvalidShowLoadLeavesCallersCurrentStateUntouched)
         file << "SHATTER-CONFIG 4\n"
              << "O 1 \"shatter.output.1\" \"Monitor\" 99 0\n";
     }
-    shatter::state::Store store(directory.path());
-    shatter::state::Show current;
+    shatter::mixer::state::Store store(directory.path());
+    shatter::mixer::state::Show current;
     current.capture_source_identity = "keep-me";
     current.capture_gain_db = -4.0F;
     std::string error;

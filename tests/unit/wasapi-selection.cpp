@@ -3,9 +3,9 @@
 #include <string>
 #include <vector>
 
-#include "wasapi_types.hpp"
+#include "backend/wasapi/wasapi_types.hpp"
 
-using namespace shatter::engine;
+using namespace shatter::backend;
 
 TEST(WasapiSelectionTest, MatchesPlaybackSessionsByApplicationNameOrExecutable)
 {

@@ -1,4 +1,4 @@
-#include "shatter/engine/audio_ring.hpp"
+#include "mixer/audio_ring.hpp"
 
 #include <gtest/gtest.h>
 
@@ -7,7 +7,7 @@
 
 TEST(AudioRingTest, PreservesSamplesAndSilenceFillsUnderflow)
 {
-    shatter::engine::AudioRingBuffer ring;
+    shatter::mixer::AudioRingBuffer ring;
     const std::array<float, 4> input{0.25F, -0.25F, 0.75F, -0.75F};
     std::array<float, 6> output{};
 
@@ -18,8 +18,8 @@ TEST(AudioRingTest, PreservesSamplesAndSilenceFillsUnderflow)
 
 TEST(AudioRingTest, BoundsWritesToPreallocatedCapacity)
 {
-    shatter::engine::AudioRingBuffer ring;
-    std::vector<float> oversized(shatter::engine::AudioRingBuffer::capacity_frames * 2 + 2, 1.0F);
-    EXPECT_EQ(ring.write(oversized.data(), shatter::engine::AudioRingBuffer::capacity_frames + 1),
-              shatter::engine::AudioRingBuffer::capacity_frames);
+    shatter::mixer::AudioRingBuffer ring;
+    std::vector<float> oversized(shatter::mixer::AudioRingBuffer::capacity_frames * 2 + 2, 1.0F);
+    EXPECT_EQ(ring.write(oversized.data(), shatter::mixer::AudioRingBuffer::capacity_frames + 1),
+              shatter::mixer::AudioRingBuffer::capacity_frames);
 }
