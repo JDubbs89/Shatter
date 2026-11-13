@@ -117,7 +117,7 @@ jobs:
         run: >-
           cmake -S . -B build
           -DBUILD_TESTING=ON
-          -DSHATTER_VERSION=${{ steps.version.outputs.version }}
+          "-DSHATTER_VERSION=${{ steps.version.outputs.version }}"
           -DSHATTER_PLATFORM=${{ matrix.platform }}
           -DSHATTER_AUDIO_BACKEND=${{ matrix.backend }}
           -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
@@ -178,7 +178,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Failed to build the newer-version upgrade fixture' }
           ./tests/integration/windows-msi.ps1 -MsiPath $msi.FullName `
             -RebuiltMsiPath (Join-Path $fixtures 'rebuilt.msi') `
-            -UpgradeMsiPath (Join-Path $fixtures 'upgrade.msi')
+            -UpgradeMsiPath (Join-Path $fixtures 'upgrade.msi') `
+            -ExpectedVersion $env:PACKAGE_VERSION
           Copy-Item $msi.FullName $env:RUNNER_TEMP
 
       - name: Show Windows packaging diagnostics

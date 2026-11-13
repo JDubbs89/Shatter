@@ -4,7 +4,9 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$RebuiltMsiPath,
     [Parameter(Mandatory = $true)]
-    [string]$UpgradeMsiPath
+    [string]$UpgradeMsiPath,
+    [Parameter(Mandatory = $true)]
+    [string]$ExpectedVersion
 )
 
 $ErrorActionPreference = 'Stop'
@@ -92,9 +94,15 @@ $binary = Join-Path $binPath 'shatter.exe'
 if ((Get-MsiProperty $MsiPath 'ProductCode') -eq (Get-MsiProperty $RebuiltMsiPath 'ProductCode')) {
     throw 'Same-version replacement fixture must use a different ProductCode'
 }
-if ((Get-MsiProperty $MsiPath 'ProductVersion') -ne (Get-MsiProperty $RebuiltMsiPath 'ProductVersion') -or
-    [version](Get-MsiProperty $UpgradeMsiPath 'ProductVersion') -le [version](Get-MsiProperty $MsiPath 'ProductVersion')) {
-    throw 'MSI fixtures must include a same-version replacement and a newer version'
+$baseVersion = Get-MsiProperty $MsiPath 'ProductVersion'
+$rebuiltVersion = Get-MsiProperty $RebuiltMsiPath 'ProductVersion'
+$upgradeVersion = Get-MsiProperty $UpgradeMsiPath 'ProductVersion'
+Write-Host "MSI versions: expected=$ExpectedVersion base=$baseVersion rebuilt=$rebuiltVersion upgrade=$upgradeVersion"
+if ($baseVersion -ne $ExpectedVersion) {
+    throw "Expected base MSI version $ExpectedVersion, got $baseVersion"
+}
+if ($baseVersion -ne $rebuiltVersion -or [version]$upgradeVersion -le [version]$baseVersion) {
+    throw "MSI fixtures must include a same-version replacement and a newer version: base=$baseVersion rebuilt=$rebuiltVersion upgrade=$upgradeVersion"
 }
 foreach ($startup in @($false, $true)) {
     $installed = $false
