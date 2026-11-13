@@ -11,7 +11,7 @@
     <MajorUpgrade Schedule="afterInstallInitialize" AllowSameVersionUpgrades="yes" MigrateFeatures="yes"
                   DowngradeErrorMessage="A later version of Shatter is already installed." />
     <FeatureRef Id="ProductFeature" />
-    <Property Id="INSTALL_ROOT" Secure="yes" />
+    <!-- CPack's properties.wxi declares INSTALL_ROOT as a secure property. -->
     <Property Id="SHATTER_PREVIOUS_INSTALL_ROOT" Secure="yes">
       <RegistrySearch Id="ExistingShatterInstallRoot" Root="HKLM"
                       Key="Software\Shatter\Installer" Name="InstallRoot" Type="raw" />

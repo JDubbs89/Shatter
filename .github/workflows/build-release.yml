@@ -181,6 +181,16 @@ jobs:
             -UpgradeMsiPath (Join-Path $fixtures 'upgrade.msi')
           Copy-Item $msi.FullName $env:RUNNER_TEMP
 
+      - name: Show Windows packaging diagnostics
+        if: failure() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Get-ChildItem build -Recurse -File -Filter wix.log -ErrorAction SilentlyContinue |
+            ForEach-Object {
+              Write-Host "WiX log: $($_.FullName)"
+              Get-Content $_.FullName
+            }
+
       - uses: actions/upload-artifact@v4
         if: matrix.backend != 'NONE'
         with:
