@@ -71,37 +71,6 @@ std::string PipeWireBackend::output_destination_selector(const NodeInfo& node)
     return mixer::make_stable_selector_id(node.media_class == "Stream/Input/Audio" ? "input" : "device", identity);
 }
 
-PipeWireBackend::CaptureChannel* PipeWireBackend::resolve_capture_channel_locked(
-    std::string_view selector, std::string& error)
-{
-    if (selector == "capture" || mixer::selector_name_matches(selector, "Microphone")) {
-        CaptureChannel* only = nullptr;
-        for (auto& channel : capture_channels_) {
-            if (!channel.in_use) continue;
-            if (only != nullptr) {
-                error = "multiple capture channels are available; use a listed capture name or ID";
-                return nullptr;
-            }
-            only = &channel;
-        }
-        if (only == nullptr) error = "no capture channels are available";
-        return only;
-    }
-    CaptureChannel* match = nullptr;
-    for (auto& channel : capture_channels_) {
-        if (!channel.in_use) continue;
-        if (channel.selector_id != selector && !mixer::selector_name_matches(channel.name, selector) &&
-            channel.identity != selector) continue;
-        if (match != nullptr) {
-            error = "capture selector is ambiguous; use the listed capture ID";
-            return nullptr;
-        }
-        match = &channel;
-    }
-    if (match == nullptr) error = "unknown capture channel: " + std::string(selector);
-    return match;
-}
-
 void PipeWireBackend::refresh_output_link_locked()
 {
     bool speaker_playback_linked = false;
@@ -245,25 +214,8 @@ int PipeWireBackend::on_output_request(spa_loop*, bool, std::uint32_t, const voi
         const auto selector = separator == std::string::npos ? std::string_view{} :
             std::string_view(request.first).substr(separator + 1);
         std::lock_guard lock(backend.nodes_mutex_);
-        OutputChannel* output = backend.resolve_output_locked(request.second, request.error);
-        if (output != nullptr) {
-            const auto index = static_cast<std::size_t>(output - backend.output_channels_.data());
-            const std::uint32_t bit = 1U << index;
-            std::atomic<std::uint32_t>* mask = nullptr;
-            if (scope == "stream") {
-                auto* stream = backend.resolve_stream_locked(selector, request.error);
-                if (stream != nullptr) mask = &stream->output_mask;
-            } else if (scope == "capture") {
-                auto* channel = backend.resolve_capture_channel_locked(selector, request.error);
-                if (channel != nullptr) mask = &channel->output_mask;
-            } else request.error = "input send scope must be stream or capture";
-            if (mask != nullptr) {
-                auto value = mask->load(std::memory_order_relaxed);
-                value = request.assigned ? (value | bit) : (value & ~bit);
-                mask->store(value, std::memory_order_release);
-                request.succeeded = true;
-            }
-        }
+        request.succeeded = backend.channel_controls().assign_input_output_locked(
+            scope, selector, request.second, request.assigned, request.error);
         break;
     }
     case OutputRequest::Action::load_config:
@@ -339,13 +291,13 @@ bool PipeWireBackend::make_output_at_locked(std::string name, std::size_t slot, 
         for (auto& assigned_name : output.assigned_sink_names) assigned_name.clear();
         for (auto& identity : output.assigned_sink_identities) identity.clear();
         output.name = std::move(name);
-        output.node_name = "shatter.output." + std::to_string(index);
+        output.identity = "shatter.output." + std::to_string(index);
         lock.unlock();
         if (!create_output_stream(output, false, error)) {
             lock.lock();
             output.in_use = false;
             output.name.clear();
-            output.node_name.clear();
+            output.identity.clear();
             return false;
         }
         return true;
@@ -561,10 +513,10 @@ bool PipeWireBackend::delete_output_locked(std::string_view selector, std::strin
     for (auto& channel : capture_channels_)
         channel.output_mask.fetch_and(~bit, std::memory_order_release);
     output->linked.store(false, std::memory_order_release);
-    trace_output("delete.before-destroy", output, output->node_name);
+    trace_output("delete.before-destroy", output, output->identity);
     lock.unlock();
     destroy_output_stream(*output);
-    trace_output("delete.after-destroy", output, output->node_name);
+    trace_output("delete.after-destroy", output, output->identity);
     for (auto& stream : playback_streams_) {
         stream.output_mask.fetch_and(~bit, std::memory_order_release);
         stream.audio[index].discard_all();
@@ -578,7 +530,7 @@ bool PipeWireBackend::delete_output_locked(std::string_view selector, std::strin
     lock.lock();
     output->in_use = false;
     output->name.clear();
-    output->node_name.clear();
+    output->identity.clear();
     output->node_id = PW_ID_ANY;
     output->sink_count = 0;
     output->assigned_sink_count = 0;
@@ -586,25 +538,6 @@ bool PipeWireBackend::delete_output_locked(std::string_view selector, std::strin
     for (auto& identity : output->assigned_sink_identities) identity.clear();
     trace_output("delete.complete", output);
     return true;
-}
-
-PipeWireBackend::OutputChannel* PipeWireBackend::resolve_output_locked(std::string_view selector,
-                                                                    std::string& error)
-{
-    OutputChannel* match = nullptr;
-    for (auto& output : output_channels_) {
-        if (!output.in_use) continue;
-        if (output.name == selector || output.node_name == selector) {
-            if (match != nullptr) {
-                error = "output selector is ambiguous; use its listed output identity";
-                return nullptr;
-            }
-            match = &output;
-        }
-    }
-    if (match != nullptr) return match;
-    error = "unknown output channel: " + std::string(selector);
-    return nullptr;
 }
 
 bool PipeWireBackend::assign_output_sink_locked(std::string_view output_selector,
@@ -839,21 +772,21 @@ bool PipeWireBackend::assign_output_sink_locked(std::string_view output_selector
     return true;
 }
 
-bool PipeWireBackend::assign_app_output_locked(std::string_view app_selector,
-                                              std::string_view output_selector, bool assigned,
-                                              std::string& error)
+PipeWireBackend::CaptureChannel* PipeWireBackend::resolve_capture_channel_locked(std::string_view selector, std::string& error)
 {
-    AppChannel* app = resolve_channel_locked(app_selector, error);
-    if (app == nullptr) return false;
-    OutputChannel* output = resolve_output_locked(output_selector, error);
-    if (output == nullptr) return false;
-    const auto index = static_cast<std::size_t>(output - output_channels_.data());
-    const auto bit = 1U << index;
-    auto mask = app->output_mask.load(std::memory_order_relaxed);
-    if (assigned) mask |= bit;
-    else mask &= ~bit;
-    app->output_mask.store(mask, std::memory_order_release);
-    return true;
+    return static_cast<CaptureChannel*>(channel_controls().resolve_capture_channel_locked(selector, error));
+}
+
+PipeWireBackend::OutputChannel* PipeWireBackend::resolve_output_locked(std::string_view selector, std::string& error)
+{
+    return static_cast<OutputChannel*>(channel_controls().resolve_output_locked(selector, error));
+}
+
+bool PipeWireBackend::assign_app_output_locked(std::string_view app_selector,
+                                                std::string_view output_selector, bool assigned,
+                                                std::string& error)
+{
+    return channel_controls().assign_app_output_locked(app_selector, output_selector, assigned, error);
 }
 
 } // namespace shatter::backend

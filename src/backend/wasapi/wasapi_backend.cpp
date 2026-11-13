@@ -8,7 +8,8 @@
 #include <propsys.h>
 #include <wrl/client.h>
 
-#include "backend/audio_backend.hpp"
+#include "backend/iaudio_backend.hpp"
+#include "mixer/engine.hpp"
 #include "mixer/health.hpp"
 #include "backend/wasapi/wasapi_types.hpp"
 
@@ -152,7 +153,7 @@ bool endpoint_name(IMMDevice* device, std::string& name, std::string& error)
     return true;
 }
 
-bool enumerate_endpoints(std::vector<WasapiPlaybackEndpoint>& endpoints, std::string& error)
+bool enumerate_native_endpoints(std::vector<WasapiPlaybackEndpoint>& endpoints, std::string& error)
 {
     ComApartment apartment(error);
     if (!apartment.ready()) return false;
@@ -272,13 +273,42 @@ std::string unsupported_message()
     return "WASAPI currently supports playback session and endpoint discovery only";
 }
 
-class WasapiBackend final : public AudioBackend {
+class WasapiBackend final : public IAudioBackend {
 public:
+    static std::string unsupported_operation()
+    {
+        return "WASAPI currently supports playback session and endpoint discovery only";
+    }
+    bool enumerate_endpoints(std::vector<Endpoint>& endpoints, std::string& error) const override
+    {
+        if (!started_.load(std::memory_order_acquire)) {
+            error = "WASAPI backend is not running";
+            return false;
+        }
+        std::vector<WasapiPlaybackEndpoint> devices;
+        std::vector<WasapiPlaybackSession> sessions;
+        if (!enumerate_native_endpoints(devices, error) || !enumerate_playback_sessions(sessions, error))
+            return false;
+        std::vector<Endpoint> result;
+        for (const auto& device : devices)
+            result.push_back({device.id, device.id, device.name,
+                              EndpointKind::playback_device, device.is_default, {}});
+        for (const auto& session : sessions) {
+            const std::string id = session.session_id.empty()
+                ? "PID " + std::to_string(session.process_id) : session.session_id;
+            result.push_back({id, id, session.application, EndpointKind::playback_stream, {}, {}});
+        }
+        has_active_endpoint_.store(!devices.empty(), std::memory_order_release);
+        endpoints = std::move(result);
+        error.clear();
+        return true;
+    }
+
     bool start(std::string& error) override
     {
         if (started_.load(std::memory_order_acquire)) return true;
         std::vector<WasapiPlaybackEndpoint> endpoints;
-        if (!enumerate_endpoints(endpoints, error)) return false;
+        if (!enumerate_native_endpoints(endpoints, error)) return false;
         has_active_endpoint_.store(!endpoints.empty(), std::memory_order_release);
         started_.store(true, std::memory_order_release);
         return true;
@@ -290,36 +320,7 @@ public:
         has_active_endpoint_.store(false, std::memory_order_release);
     }
 
-#define SHATTER_WASAPI_UNSUPPORTED(signature) \
-    bool signature override { error = unsupported_message(); return false; }
-    SHATTER_WASAPI_UNSUPPORTED(set_app_gain_db(std::string_view, float, std::string& error))
-    SHATTER_WASAPI_UNSUPPORTED(set_stream_gain_db(std::string_view, float, std::string& error))
-    SHATTER_WASAPI_UNSUPPORTED(set_app_muted(std::string_view, bool, std::string& error))
-    SHATTER_WASAPI_UNSUPPORTED(set_stream_muted(std::string_view, bool, std::string& error))
-    SHATTER_WASAPI_UNSUPPORTED(rename_app(std::string_view, std::string, std::string& error))
-    SHATTER_WASAPI_UNSUPPORTED(rename_stream(std::string_view, std::string, std::string& error))
-    SHATTER_WASAPI_UNSUPPORTED(set_capture_source(std::string_view, std::string& error))
-    SHATTER_WASAPI_UNSUPPORTED(set_capture_gain_db(float, std::string& error))
-    SHATTER_WASAPI_UNSUPPORTED(set_capture_muted(std::string_view, bool, std::string& error))
-    SHATTER_WASAPI_UNSUPPORTED(set_fader_db(std::string_view, std::string_view, float, bool, std::string& error))
-    SHATTER_WASAPI_UNSUPPORTED(adjust_fader_db(std::string_view, std::string_view, float, bool, std::string& error))
-    SHATTER_WASAPI_UNSUPPORTED(set_capture_speaker_send(bool, std::string& error))
-    SHATTER_WASAPI_UNSUPPORTED(set_output_gain_db(std::string_view, float, std::string& error))
-    SHATTER_WASAPI_UNSUPPORTED(set_output_muted(std::string_view, bool, std::string& error))
-    SHATTER_WASAPI_UNSUPPORTED(make_output(std::string, bool, std::string& error))
-    SHATTER_WASAPI_UNSUPPORTED(delete_output(std::string_view, std::string& error))
-    SHATTER_WASAPI_UNSUPPORTED(assign_output_destination(std::string_view, std::string_view, bool, std::string& error))
-    SHATTER_WASAPI_UNSUPPORTED(assign_app_output(std::string_view, std::string_view, bool, std::string& error))
-    SHATTER_WASAPI_UNSUPPORTED(assign_input_output(std::string_view, std::string_view, std::string_view, bool,
-                                                    std::string& error))
-    SHATTER_WASAPI_UNSUPPORTED(load_config(std::string_view, std::string& error))
-    SHATTER_WASAPI_UNSUPPORTED(save_config(std::string_view, std::string& error))
-#undef SHATTER_WASAPI_UNSUPPORTED
-
-    bool load_default_config(std::string&, std::string& error) override
-    { error = unsupported_message(); return false; }
-
-    std::string list_inputs(std::size_t) const override
+    std::string list_inputs(std::size_t) const
     {
         if (!started_.load(std::memory_order_acquire)) return "WASAPI backend is not running\n";
         std::vector<WasapiPlaybackSession> sessions;
@@ -340,12 +341,12 @@ public:
         return output.str();
     }
 
-    std::string list_outputs(std::size_t) const override
+    std::string list_outputs(std::size_t) const
     {
         if (!started_.load(std::memory_order_acquire)) return "WASAPI backend is not running\n";
         std::vector<WasapiPlaybackEndpoint> endpoints;
         std::string error;
-        if (!enumerate_endpoints(endpoints, error))
+        if (!enumerate_native_endpoints(endpoints, error))
             return "could not list WASAPI playback endpoints: " + error + "\n";
         has_active_endpoint_.store(!endpoints.empty(), std::memory_order_release);
         std::ostringstream output;
@@ -361,16 +362,16 @@ public:
         return output.str();
     }
 
-    std::string list_meters(std::string_view) const override
+    std::string list_meters(std::string_view) const
     { return unsupported_message() + "\nLive meters are unavailable.\n"; }
-    std::string fader_status() const override { return unsupported_message() + "\n"; }
+    std::string fader_status() const { return unsupported_message() + "\n"; }
 
-    std::string health_status() const override
+    std::string health_status() const
     {
         std::vector<WasapiPlaybackEndpoint> endpoints;
         std::string error;
         const bool running = started_.load(std::memory_order_acquire);
-        const bool queried = running && enumerate_endpoints(endpoints, error);
+        const bool queried = running && enumerate_native_endpoints(endpoints, error);
         if (running)
             has_active_endpoint_.store(queried && !endpoints.empty(), std::memory_order_release);
         const auto state = mixer::health_state(running, queried && !endpoints.empty(), 0);
@@ -385,17 +386,13 @@ public:
         return output.str();
     }
 
-    bool profile_start(std::string& error) override
-    { error = unsupported_message(); return false; }
-    std::string profile_stop(std::string& error) override
+    std::string profile_stop(std::string& error)
     { error = unsupported_message(); return {}; }
     bool available() const noexcept override
     {
         return started_.load(std::memory_order_acquire) &&
                has_active_endpoint_.load(std::memory_order_acquire);
     }
-    void begin_shutdown_fade() noexcept override {}
-    void pause_streams_for_shutdown() noexcept override {}
 
 private:
     std::atomic<bool> started_{false};
@@ -404,9 +401,11 @@ private:
 
 } // namespace
 
-std::unique_ptr<AudioBackend> create_audio_backend()
-{
-    return std::make_unique<WasapiBackend>();
-}
-
 } // namespace shatter::backend
+
+namespace shatter::mixer {
+std::unique_ptr<IControl> create_engine()
+{
+    return std::make_unique<Engine<backend::WasapiBackend>>();
+}
+} // namespace shatter::mixer

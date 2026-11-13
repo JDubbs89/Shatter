@@ -80,6 +80,7 @@ struct CaptureChannel {
 };
 
 struct OutputChannel {
+    std::string identity;
     bool in_use = false;
     std::atomic<bool> active{false};
     std::atomic<bool> linked{false};

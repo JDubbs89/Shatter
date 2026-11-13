@@ -1,7 +1,9 @@
 #pragma once
 
-#include "backend/audio_backend.hpp"
+#include "backend/iaudio_backend.hpp"
 #include "mixer/processor.hpp"
+#include "mixer/channel_controls.hpp"
+#include "mixer/audio_engine.hpp"
 #include "mixer/health.hpp"
 #include "mixer/realtime_access_gate.hpp"
 #include "mixer/runtime_profiler.hpp"
@@ -33,7 +35,11 @@ using mixer::RealtimeAccessGate;
 using mixer::RuntimeProfiler;
 using mixer::XrunCounters;
 
-class PipeWireBackend final : public AudioBackend {
+class PipeWireBackend final : public IAudioBackend {
+    struct PlaybackStream;
+    struct CaptureChannel;
+    struct OutputChannel;
+
 public:
     static constexpr std::size_t max_app_channels = mixer::max_app_channels;
     static constexpr std::size_t max_playback_streams = mixer::max_playback_streams;
@@ -46,52 +52,63 @@ public:
     PipeWireBackend(const PipeWireBackend&) = delete;
     PipeWireBackend& operator=(const PipeWireBackend&) = delete;
 
+    // Concrete callback operations used by AudioEngine<PipeWireBackend>.
+    // The native token remains private to this adapter, outside the mixer seam.
+    struct InputBuffer {
+        pw_buffer* native = nullptr;
+        const float* data = nullptr;
+        std::size_t frame_count = 0;
+        explicit operator bool() const noexcept { return native != nullptr; }
+        const float* samples() const noexcept { return data; }
+        std::size_t frames() const noexcept { return frame_count; }
+    };
+    struct OutputBuffer {
+        pw_buffer* native = nullptr;
+        float* data = nullptr;
+        std::size_t frame_count = 0;
+        explicit operator bool() const noexcept { return native != nullptr; }
+        float* samples() const noexcept { return data; }
+        std::size_t frames() const noexcept { return frame_count; }
+    };
+    InputBuffer acquire_input(PlaybackStream& stream) noexcept;
+    InputBuffer acquire_input(CaptureChannel& channel) noexcept;
+    void release_input(PlaybackStream& stream, InputBuffer buffer) noexcept;
+    void release_input(CaptureChannel& channel, InputBuffer buffer) noexcept;
+    OutputBuffer acquire_output(OutputChannel& output) noexcept;
+    void submit_output(OutputChannel& output, OutputBuffer buffer) noexcept;
+    std::size_t output_index(const OutputChannel& output) const noexcept;
+    void observe_output_timing(OutputChannel& output, const OutputBuffer& buffer,
+                               RuntimeProfiler::Scope& profile) noexcept;
+
+    bool enumerate_endpoints(std::vector<Endpoint>& endpoints, std::string& error) const override;
+    static std::string unsupported_operation() { return "PipeWire audio is unavailable"; }
+    mixer::ProcessingState processing_state() noexcept;
+    mixer::ChannelControls channel_controls() noexcept { return {processing_state(), nodes_mutex_}; }
+
     bool start(std::string& error) override;
     void stop() override;
-    bool set_app_gain_db(std::string_view channel_id, float decibels, std::string& error) override;
-    bool set_stream_gain_db(std::string_view stream_selector, float decibels, std::string& error) override;
-    bool set_app_muted(std::string_view channel_id, bool muted, std::string& error) override;
-    bool set_stream_muted(std::string_view stream_selector, bool muted, std::string& error) override;
-    bool rename_app(std::string_view current_name, std::string new_name, std::string& error) override;
-    bool rename_stream(std::string_view current_name, std::string new_name, std::string& error) override;
-    bool set_capture_source(std::string_view source_selector, std::string& error) override;
-    bool set_capture_gain_db(float decibels, std::string& error) override;
-    bool set_capture_muted(std::string_view capture_selector, bool muted, std::string& error) override;
-    bool set_fader_db(std::string_view scope, std::string_view selector, float decibels,
-                      bool minimum, std::string& error) override;
-    bool adjust_fader_db(std::string_view scope, std::string_view selector, float delta_db,
-                         bool minimum, std::string& error) override;
-    bool set_capture_speaker_send(bool enabled, std::string& error) override;
-    bool set_output_gain_db(std::string_view output_selector, float decibels,
-                            std::string& error) override;
-    bool set_output_muted(std::string_view output_selector, bool muted, std::string& error) override;
-    bool make_output(std::string name, bool capture_source, std::string& error) override;
-    bool delete_output(std::string_view selector, std::string& error) override;
+    bool make_output(std::string name, bool capture_source, std::string& error);
+    bool delete_output(std::string_view selector, std::string& error);
     bool assign_output_destination(std::string_view output_selector,
                                    std::string_view destination_selector,
-                                   bool assigned, std::string& error) override;
+                                   bool assigned, std::string& error);
     bool assign_app_output(std::string_view app_selector, std::string_view output_selector, bool assigned,
-                           std::string& error) override;
+                           std::string& error);
     bool assign_input_output(std::string_view scope, std::string_view input_selector,
                              std::string_view output_selector, bool assigned,
-                             std::string& error) override;
-    bool load_config(std::string_view name, std::string& error) override;
-    bool save_config(std::string_view name, std::string& error) override;
-    bool load_default_config(std::string& name, std::string& error) override;
-    std::string list_inputs(std::size_t terminal_width = 100) const override;
-    std::string list_outputs(std::size_t terminal_width = 100) const override;
-    std::string list_meters(std::string_view selector = {}) const override;
-    std::string fader_status() const override;
-    std::string health_status() const override;
-    bool profile_start(std::string& error) override;
-    std::string profile_stop(std::string& error) override;
+                             std::string& error);
+    bool load_config(std::string_view name, std::string& error);
+    bool save_config(std::string_view name, std::string& error);
+    bool load_default_config(std::string& name, std::string& error);
+    std::string list_inputs(std::size_t terminal_width = 100) const;
+    std::string list_outputs(std::size_t terminal_width = 100) const;
+    std::string health_status() const;
+    bool profile_start(std::string& error);
+    std::string profile_stop(std::string& error);
     bool available() const noexcept override;
-    void begin_shutdown_fade() noexcept override;
-    void pause_streams_for_shutdown() noexcept override;
+    void pause_streams_for_shutdown() noexcept;
 
 private:
-    enum class FaderUpdateMode { absolute, relative, minimum };
-
     using AppChannel = mixer::AppChannel;
 
     struct PlaybackStream : mixer::PlaybackStream {
@@ -115,7 +132,6 @@ private:
 
     struct OutputChannel : mixer::OutputChannel {
         PipeWireBackend* backend = nullptr;
-        std::string node_name;
         std::uint32_t node_id = PW_ID_ANY;
         std::array<std::uint32_t, 8> sink_node_ids{};
         std::size_t sink_count = 0;
@@ -222,8 +238,6 @@ private:
     PlaybackStream* resolve_stream_locked(std::string_view selector, std::string& error);
     std::string playback_route_key(std::string_view app_identity, std::string_view original_name) const;
     bool sink_binding_matches(const OutputChannel& output, std::size_t index, const NodeInfo& sink) const;
-    bool update_fader_db(std::string_view scope, std::string_view selector, float decibels,
-                         FaderUpdateMode mode, std::string& error);
     void run_loop();
     void cleanup();
 
@@ -275,6 +289,7 @@ private:
     std::array<mixer::OutputChannel*, max_output_channels> mixer_outputs_{};
     std::array<mixer::CaptureChannel*, max_capture_channels> mixer_captures_{};
     mixer::Processor processor_;
+    mixer::AudioEngine<PipeWireBackend> audio_engine_;
 };
 
 } // namespace shatter::backend

@@ -24,6 +24,11 @@ src/
       midi.cpp
       osc.cpp
   mixer/
+    control.hpp
+    engine.hpp
+    audio_engine.hpp
+    channel_controls.hpp / channel_controls.cpp
+    presentation.hpp / presentation.cpp
     model.hpp
     processor.hpp / processor.cpp
     dsp.hpp / dsp.cpp
@@ -38,13 +43,15 @@ src/
     fx_host.cpp
     routing_rules.cpp
   backend/
-    audio_backend.hpp
+    iaudio_backend.hpp
+    endpoint.hpp
     unavailable_audio_backend.cpp
     pipewire/
       pipewire_backend.hpp / pipewire_backend.cpp
       factory.cpp
       audio_callbacks.cpp
       registry.cpp
+      endpoints.cpp
       routing.cpp
       virtual_devices.cpp
     pulseaudio/
@@ -78,7 +85,8 @@ lifecycle. `main.cpp` only enters the CLI. The existing `--engine` process mode
 enters `control::run_service()`.
 
 `control/service.cpp` runs the persistent command loop and dispatches the private
-local command protocol through `backend::AudioBackend`. It owns command parsing,
+local command protocol through `mixer::IControl`, created by
+`mixer::create_engine()`. It owns command parsing,
 reply framing, current/startup show tracking, and the stop sequence. It does not
 handle sample buffers or include native audio headers. The same command operations
 remain available to future control surfaces; OSC and MIDI files are placeholders,
@@ -90,6 +98,43 @@ adapter uses a private Unix socket; its Windows adapter uses a per-user named
 pipe. These remain user-session processes, not new system-service integrations.
 
 ## Mixer
+
+`mixer/control.hpp` defines `IControl`, the virtual application command interface.
+`mixer/engine.hpp` implements it as `Engine<Backend>`, owning exactly one concrete
+backend. `IControl::backend()` exposes that same object's `IAudioBackend`
+interface for non-realtime discovery and lifecycle. Backend classes implement
+`IAudioBackend` directly; they do not inherit application gain, mute, show, or
+presentation methods from a broad audio base class.
+
+`mixer/channel_controls.cpp` owns selector policy, gain/mute, rename, fader
+validation and clamping, internal send-mask updates, meter queries, and shutdown
+fade requests. It borrows the portable processing state and the native adapter's
+structural mutex. `Engine<Backend>` routes supported mixer commands here; the
+prototype backends retain their previous unsupported-feature replies. Native
+creation/routing/show coordination stays with concrete adapter methods, bound by
+the selected engine specialization rather than required by `IAudioBackend`.
+
+`mixer/audio_engine.hpp` defines the separate realtime `AudioEngine<Backend>`
+template. Its C++20 input/output concepts require nonthrowing buffer acquisition,
+release/submission, sample access, frame counts, and output-slot lookup. Concrete
+backend operations are statically dispatched; this path never uses a virtual
+backend pointer. An optional concrete timing hook preserves native profiling.
+Template definitions remain in the header to allow specialization and inlining;
+this does not guarantee inlining of native library calls or the separately
+compiled processor/DSP implementation.
+
+The callback paths are independent:
+
+```text
+Native input callback -> AudioEngine<Backend> -> acquire input -> Processor input -> release input
+Native output callback -> AudioEngine<Backend> -> acquire output -> Processor output -> submit output
+```
+
+A successfully acquired buffer must be returned once even if its sample pointer
+is null. An empty acquisition owns nothing. Process gates surround acquisition,
+processing, and release; output generations are captured before input acquisition.
+This preserves callback lifetime and output-slot reuse protection.
+
 
 `mixer/model.hpp` defines portable application, playback-stream, capture, and
 output state, routing masks, gain/mute targets, smoothing state, meters, and audio
@@ -126,23 +171,33 @@ by this refactor; future implementations belong in this layer.
 
 ## Backend
 
-`backend/audio_backend.hpp` retains the existing command-facing adapter contract
-and build-selected factory. Each native implementation resolves its selectors,
-translates available operations into mixer controls/native routing, and reports
-unsupported features as before. Control includes this contract, never a concrete
-backend header.
+`backend/iaudio_backend.hpp` defines the small virtual interface: start, stop,
+availability, and structured endpoint enumeration. `endpoint.hpp` defines Shatter
+endpoint IDs, native identities, names, roles, optional default status, and formats.
+Enumeration replaces the caller's snapshot only on success. Unknown native
+formats/defaults remain unspecified; the processor's 48 kHz stereo format is not
+reported as a device capability. Enumeration currently covers each adapter's
+implemented discovery scope; capture enumeration is not added to the playback-only
+prototypes. Discovery IDs for transient streams are not persistent identities.
+
+CLI listing methods retain their previous text for compatibility. Future control
+surfaces can use structured enumeration through `IAudioBackend` without parsing
+those tables. The selected provider's factory now constructs
+`Engine<ConcreteBackend>` and returns `IControl`, rather than constructing a
+backend behind the old broad command interface.
 
 `PipeWireBackend` is consistently named with `PulseAudioBackend` and
 `WasapiBackend`. Its implementation is split by responsibility:
 
 | File | Responsibility |
 | --- | --- |
-| `pipewire_backend.cpp` | Connection/control-loop lifecycle, command translation, discovery-to-channel reconciliation, show coordination, listings and native diagnostics |
+| `pipewire_backend.cpp` | Connection/control-loop lifecycle, discovery-to-channel reconciliation, show coordination, compatibility listings and native diagnostics |
 | `registry.cpp` | Observed nodes, ports, links, metadata, and removal callbacks |
 | `virtual_devices.cpp` | Playback ingress sinks and output endpoint lifecycle |
 | `routing.cpp` | Control-loop requests, native links, output assignments, and applying shows to discovered endpoints |
-| `audio_callbacks.cpp` | Acquire/release PipeWire buffers, decode native buffer layout, query native timing, and call the portable processor |
-| `factory.cpp` | Construct the selected adapter |
+| `audio_callbacks.cpp` | Concrete buffer acquisition/release/submission and timing operations, plus native callbacks entering `AudioEngine<PipeWireBackend>` |
+| `endpoints.cpp` | Translate registry observations into structured Shatter endpoints |
+| `factory.cpp` | Construct the mixer engine owning the selected adapter |
 
 PulseAudio retains discovery and playback stream routing, including its libpulse
 connection and routing worker. WASAPI retains synchronous session/endpoint
@@ -162,10 +217,12 @@ shatter (main)
 ```
 
 Only the selected audio adapter receives its native audio SDK dependency.
-`shatter_mixer` has no dependency on Control, Backend, or an audio SDK and builds
-in the no-audio configuration too. The command-facing contract remains broad to
-preserve existing backend behavior; a future common command model can replace
-that contract without changing the portable processing seam.
+The compiled `shatter_mixer` library has no native audio SDK dependency and builds
+in the no-audio configuration too. Its portable controls, processor, and DSP do
+not depend on concrete adapters. The assembly template in `mixer/engine.hpp`
+knows the SDK-free `IAudioBackend` contract and is instantiated in the selected
+provider's factory; this is why the link graph has Backend depending on Mixer,
+while application commands enter the mixer engine first.
 
 For PipeWire, the daemon main thread dispatches commands and performs file I/O.
 A separate PipeWire control-loop thread handles discovery and structural requests.
@@ -177,8 +234,13 @@ independent of WASAPI discovery.
 ## Verification
 
 Existing unit and integration coverage remains under `tests/`. The portable
-processor has direct sample-to-sample coverage in `src/mixer/processor_test.cpp`,
-which builds without a native audio SDK. PipeWire playback/capture integration
+processor has direct sample-to-sample coverage in `src/mixer/processor_test.cpp`.
+`audio_engine_test.cpp` checks the static buffer seam, including invalid buffers,
+closed gates, and slot reuse. `engine_test.cpp` checks virtual control/discovery
+against the same concrete backend, shared controls, and discovery-only adapters
+without mixer/buffer stubs. These tests use an in-memory adapter without an audio
+SDK. `backend/contract_test.cpp` exercises pre-start discovery on the actual
+build-selected adapter. PipeWire playback/capture integration
 scripts cover the native-to-mixer path and persistence; PulseAudio integration
 covers its existing routing behavior. Windows lifecycle and installer checks
 remain in the Windows CI configuration.

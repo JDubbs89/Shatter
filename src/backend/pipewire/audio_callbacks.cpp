@@ -8,10 +8,88 @@
 namespace shatter::backend {
 namespace {
 
-constexpr auto kSampleRate = mixer::sample_rate;
-constexpr auto kChannels = mixer::channels;
+PipeWireBackend::InputBuffer acquire_input_buffer(pw_stream* stream) noexcept
+{
+    PipeWireBackend::InputBuffer buffer{pw_stream_dequeue_buffer(stream)};
+    if (!buffer || buffer.native->buffer == nullptr || buffer.native->buffer->n_datas == 0)
+        return buffer;
+    const spa_data& data = buffer.native->buffer->datas[0];
+    if (data.data != nullptr && data.chunk != nullptr) {
+        const auto stride = data.chunk->stride > 0 ? static_cast<std::size_t>(data.chunk->stride)
+                                                   : sizeof(float) * mixer::channels;
+        buffer.frame_count = static_cast<std::size_t>(data.chunk->size) / stride;
+        buffer.data = reinterpret_cast<const float*>(
+            static_cast<const std::uint8_t*>(data.data) + data.chunk->offset);
+    }
+    return buffer;
+}
 
 } // namespace
+
+PipeWireBackend::InputBuffer PipeWireBackend::acquire_input(PlaybackStream& stream) noexcept
+{
+    return acquire_input_buffer(stream.sink);
+}
+
+PipeWireBackend::InputBuffer PipeWireBackend::acquire_input(CaptureChannel& channel) noexcept
+{
+    return acquire_input_buffer(channel.source_stream);
+}
+
+void PipeWireBackend::release_input(PlaybackStream& stream, InputBuffer buffer) noexcept
+{
+    pw_stream_queue_buffer(stream.sink, buffer.native);
+}
+
+void PipeWireBackend::release_input(CaptureChannel& channel, InputBuffer buffer) noexcept
+{
+    pw_stream_queue_buffer(channel.source_stream, buffer.native);
+}
+
+PipeWireBackend::OutputBuffer PipeWireBackend::acquire_output(OutputChannel& output) noexcept
+{
+    OutputBuffer buffer{pw_stream_dequeue_buffer(output.stream)};
+    if (!buffer || buffer.native->buffer == nullptr || buffer.native->buffer->n_datas == 0)
+        return buffer;
+    const spa_data& data = buffer.native->buffer->datas[0];
+    if (data.data != nullptr && data.chunk != nullptr) {
+        const auto capacity = static_cast<std::size_t>(data.maxsize) / (sizeof(float) * mixer::channels);
+        const auto requested = buffer.native->requested == 0
+            ? capacity : static_cast<std::size_t>(buffer.native->requested);
+        buffer.frame_count = std::min(capacity, requested);
+        buffer.data = static_cast<float*>(data.data);
+    }
+    return buffer;
+}
+
+void PipeWireBackend::submit_output(OutputChannel& output, OutputBuffer buffer) noexcept
+{
+    if (buffer.samples() != nullptr) {
+        spa_chunk& chunk = *buffer.native->buffer->datas[0].chunk;
+        chunk.offset = 0;
+        chunk.stride = sizeof(float) * mixer::channels;
+        chunk.size = buffer.frames() * sizeof(float) * mixer::channels;
+    }
+    pw_stream_queue_buffer(output.stream, buffer.native);
+}
+
+std::size_t PipeWireBackend::output_index(const OutputChannel& output) const noexcept
+{
+    return static_cast<std::size_t>(&output - output_channels_.data());
+}
+
+void PipeWireBackend::observe_output_timing(OutputChannel& output, const OutputBuffer&,
+                                            RuntimeProfiler::Scope& profile) noexcept
+{
+    if (!profiler_.active()) return;
+    pw_time timing{};
+    if (pw_stream_get_time_n(output.stream, &timing, sizeof(timing)) == 0 && timing.rate.denom != 0) {
+        const auto delay_ns = timing.delay > 0
+            ? static_cast<std::uint64_t>(timing.delay) * timing.rate.num * 1'000'000'000ULL /
+                timing.rate.denom : 0;
+        profile.record_pipewire_time(delay_ns, timing.queued / (sizeof(float) * mixer::channels));
+    }
+}
 
 void PipeWireBackend::on_output_process(void* data)
 {
@@ -33,85 +111,17 @@ void PipeWireBackend::on_capture_source_process(void* data)
 
 void PipeWireBackend::stream_input_process(PlaybackStream& stream)
 {
-    RealtimeAccessGate::Guard process_guard(stream.process_gate);
-    if (!process_guard) return;
-    const auto output_generations = processor_.output_generations();
-    RuntimeProfiler::Scope profile_scope(profiler_, RuntimeProfiler::Callback::input);
-    pw_buffer* buffer = pw_stream_dequeue_buffer(stream.sink);
-    if (buffer == nullptr) {
-        return;
-    }
-    if (buffer->buffer != nullptr && buffer->buffer->n_datas > 0) {
-        spa_data& data = buffer->buffer->datas[0];
-        if (data.data != nullptr && data.chunk != nullptr) {
-            const auto stride = data.chunk->stride > 0 ? static_cast<std::size_t>(data.chunk->stride)
-                                                       : sizeof(float) * kChannels;
-            const auto frames = static_cast<std::size_t>(data.chunk->size) / stride;
-            const auto* samples = reinterpret_cast<const float*>(
-                static_cast<const std::uint8_t*>(data.data) + data.chunk->offset);
-            processor_.process_playback(stream, samples, frames, output_generations, profile_scope);
-        }
-    }
-    pw_stream_queue_buffer(stream.sink, buffer);
+    audio_engine_.process_playback(stream);
 }
 
-void PipeWireBackend::capture_source_process(CaptureChannel& capture_channel)
+void PipeWireBackend::capture_source_process(CaptureChannel& channel)
 {
-    RealtimeAccessGate::Guard process_guard(capture_channel.process_gate);
-    if (!process_guard) return;
-    const auto output_generations = processor_.output_generations();
-    RuntimeProfiler::Scope profile_scope(profiler_, RuntimeProfiler::Callback::input);
-    pw_buffer* buffer = pw_stream_dequeue_buffer(capture_channel.source_stream);
-    if (buffer == nullptr) return;
-    if (buffer->buffer != nullptr && buffer->buffer->n_datas > 0) {
-        spa_data& data = buffer->buffer->datas[0];
-        if (data.data != nullptr && data.chunk != nullptr) {
-            const auto stride = data.chunk->stride > 0 ? static_cast<std::size_t>(data.chunk->stride)
-                                                       : sizeof(float) * kChannels;
-            const auto frames = static_cast<std::size_t>(data.chunk->size) / stride;
-            const auto* samples = reinterpret_cast<const float*>(
-                static_cast<const std::uint8_t*>(data.data) + data.chunk->offset);
-            processor_.process_capture(capture_channel, samples, frames, output_generations, profile_scope);
-        }
-    }
-    pw_stream_queue_buffer(capture_channel.source_stream, buffer);
+    audio_engine_.process_capture(channel);
 }
 
 void PipeWireBackend::output_process(OutputChannel& output)
 {
-    RealtimeAccessGate::Guard process_guard(output.process_gate);
-    if (!process_guard) return;
-    RuntimeProfiler::Scope profile_scope(profiler_, RuntimeProfiler::Callback::output);
-    pw_buffer* buffer = pw_stream_dequeue_buffer(output.stream);
-    if (buffer == nullptr) return;
-
-    if (buffer->buffer != nullptr && buffer->buffer->n_datas > 0) {
-        spa_data& data = buffer->buffer->datas[0];
-        if (data.data != nullptr && data.chunk != nullptr) {
-            const std::size_t output_index = static_cast<std::size_t>(&output - output_channels_.data());
-            const auto capacity_frames = static_cast<std::size_t>(data.maxsize) / (sizeof(float) * kChannels);
-            const auto requested_frames = buffer->requested == 0
-                ? capacity_frames : static_cast<std::size_t>(buffer->requested);
-            const auto frames = std::min(capacity_frames, requested_frames);
-            profile_scope.set_frames(frames, kSampleRate);
-            if (profiler_.active()) {
-                pw_time timing{};
-                if (pw_stream_get_time_n(output.stream, &timing, sizeof(timing)) == 0 && timing.rate.denom != 0) {
-                    const auto delay_ns = timing.delay > 0
-                        ? static_cast<std::uint64_t>(timing.delay) * timing.rate.num * 1'000'000'000ULL /
-                            timing.rate.denom : 0;
-                    profile_scope.record_pipewire_time(delay_ns, timing.queued / (sizeof(float) * kChannels));
-                }
-            }
-
-            auto* samples = reinterpret_cast<float*>(data.data);
-            processor_.process_output(output_index, samples, frames, profile_scope);
-            data.chunk->offset = 0;
-            data.chunk->stride = sizeof(float) * kChannels;
-            data.chunk->size = frames * sizeof(float) * kChannels;
-        }
-    }
-    pw_stream_queue_buffer(output.stream, buffer);
+    audio_engine_.process_output(output);
 }
 
 } // namespace shatter::backend

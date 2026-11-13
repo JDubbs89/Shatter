@@ -6,16 +6,18 @@
 #include <string>
 #include <string_view>
 
-namespace shatter::backend {
+namespace shatter::backend { class IAudioBackend; }
 
-// Command-facing contract for the selected native audio adapter. It contains no
-// native SDK types. Implementations resolve selectors and coordinate endpoint
-// lifecycle; adapters that process samples use mixer::Processor. Unsupported
-// operations retain their existing backend-specific errors.
-class AudioBackend {
+namespace shatter::mixer {
+
+// Application-facing control interface. Commands are virtual; realtime sample
+// processing never passes through this interface. The selected engine owns the
+// concrete backend and implements mixer commands using shared channel controls.
+class IControl {
 public:
-    virtual ~AudioBackend() = default;
+    virtual ~IControl() = default;
 
+    virtual backend::IAudioBackend& backend() noexcept = 0;
     virtual bool start(std::string& error) = 0;
     virtual void stop() = 0;
     virtual bool set_app_gain_db(std::string_view channel_id, float decibels, std::string& error) = 0;
@@ -61,6 +63,6 @@ public:
     virtual void pause_streams_for_shutdown() noexcept = 0;
 };
 
-std::unique_ptr<AudioBackend> create_audio_backend();
+std::unique_ptr<IControl> create_engine();
 
-} // namespace shatter::backend
+} // namespace shatter::mixer

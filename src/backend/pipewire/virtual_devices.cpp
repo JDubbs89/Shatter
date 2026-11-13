@@ -153,7 +153,7 @@ bool PipeWireBackend::create_output_stream(OutputChannel& output, bool autoconne
     pw_properties* properties = pw_properties_new(
         PW_KEY_MEDIA_TYPE, "Audio", PW_KEY_MEDIA_CATEGORY, media_category,
         PW_KEY_MEDIA_ROLE, media_role, PW_KEY_MEDIA_CLASS, media_class,
-        PW_KEY_NODE_NAME, output.node_name.c_str(), PW_KEY_NODE_DESCRIPTION, description.c_str(),
+        PW_KEY_NODE_NAME, output.identity.c_str(), PW_KEY_NODE_DESCRIPTION, description.c_str(),
         PW_KEY_NODE_AUTOCONNECT, output.capture_source ? "false" : "true", "node.dont-fallback", "true",
         PW_KEY_NODE_VIRTUAL, "true", PW_KEY_APP_NAME, "Shatter", nullptr);
     if (properties == nullptr) { error = "could not allocate PipeWire output properties"; return false; }

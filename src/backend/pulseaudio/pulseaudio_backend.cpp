@@ -1,6 +1,7 @@
 #include "backend/pulseaudio/pulseaudio_client.hpp"
 
-#include "backend/audio_backend.hpp"
+#include "backend/iaudio_backend.hpp"
+#include "mixer/engine.hpp"
 #include "mixer/health.hpp"
 
 #include <algorithm>
@@ -19,13 +20,40 @@
 namespace shatter::backend {
 namespace {
 
-std::string unsupported_operation()
+std::string backend_unsupported_message()
 {
     return "PulseAudio currently supports playback stream discovery and routing only";
 }
 
-class PulseAudioBackend final : public AudioBackend {
+class PulseAudioBackend final : public IAudioBackend {
 public:
+    static std::string unsupported_operation()
+    {
+        return "PulseAudio currently supports playback stream discovery and routing only";
+    }
+    bool enumerate_endpoints(std::vector<Endpoint>& endpoints, std::string& error) const override
+    {
+        std::vector<PulsePlaybackStream> streams;
+        std::vector<PulsePlaybackSink> sinks;
+        if (!client_->playback_streams(streams, error) || !client_->sinks(sinks, error)) return false;
+        std::string default_name, default_error;
+        const bool known_default = client_->default_sink(default_name, default_error);
+        std::vector<Endpoint> result;
+        for (const auto& sink : sinks) {
+            Endpoint endpoint{sink.name, sink.name, sink.description,
+                              EndpointKind::playback_device, {}, {}};
+            if (known_default) endpoint.is_default = sink.name == default_name;
+            result.push_back(std::move(endpoint));
+        }
+        for (const auto& stream : streams) {
+            const auto id = std::to_string(stream.index);
+            result.push_back({id, id, stream.application, EndpointKind::playback_stream, {}, {}});
+        }
+        endpoints = std::move(result);
+        error.clear();
+        return true;
+    }
+
     PulseAudioBackend()
         : client_(create_pulse_audio_client())
     {
@@ -60,30 +88,8 @@ public:
         started_.store(false, std::memory_order_release);
     }
 
-    bool set_app_gain_db(std::string_view, float, std::string& error) override { return unsupported(error); }
-    bool set_stream_gain_db(std::string_view, float, std::string& error) override { return unsupported(error); }
-    bool set_app_muted(std::string_view, bool, std::string& error) override { return unsupported(error); }
-    bool set_stream_muted(std::string_view, bool, std::string& error) override { return unsupported(error); }
-    bool rename_app(std::string_view, std::string, std::string& error) override { return unsupported(error); }
-    bool rename_stream(std::string_view, std::string, std::string& error) override { return unsupported(error); }
-    bool set_capture_source(std::string_view, std::string& error) override { return unsupported(error); }
-    bool set_capture_gain_db(float, std::string& error) override { return unsupported(error); }
-    bool set_capture_muted(std::string_view, bool, std::string& error) override { return unsupported(error); }
-    bool set_fader_db(std::string_view, std::string_view, float, bool, std::string& error) override
-    { return unsupported(error); }
-    bool adjust_fader_db(std::string_view, std::string_view, float, bool, std::string& error) override
-    { return unsupported(error); }
-    bool set_capture_speaker_send(bool, std::string& error) override { return unsupported(error); }
-    bool set_output_gain_db(std::string_view, float, std::string& error) override { return unsupported(error); }
-    bool set_output_muted(std::string_view, bool, std::string& error) override { return unsupported(error); }
-    bool make_output(std::string, bool, std::string& error) override { return unsupported(error); }
-    bool delete_output(std::string_view, std::string& error) override { return unsupported(error); }
-    bool assign_output_destination(std::string_view, std::string_view, bool,
-                                   std::string& error) override
-    { return unsupported(error); }
-
     bool assign_app_output(std::string_view app_selector, std::string_view sink_selector,
-                           bool assigned, std::string& error) override
+                           bool assigned, std::string& error)
     {
         std::vector<PulsePlaybackStream> streams;
         if (!client_->playback_streams(streams, error)) return false;
@@ -155,13 +161,7 @@ public:
         return succeeded;
     }
 
-    bool assign_input_output(std::string_view, std::string_view, std::string_view, bool,
-                             std::string& error) override { return unsupported(error); }
-    bool load_config(std::string_view, std::string& error) override { return unsupported(error); }
-    bool save_config(std::string_view, std::string& error) override { return unsupported(error); }
-    bool load_default_config(std::string&, std::string& error) override { return unsupported(error); }
-
-    std::string list_inputs(std::size_t) const override
+    std::string list_inputs(std::size_t) const
     {
         std::vector<PulsePlaybackStream> streams;
         std::string error;
@@ -187,12 +187,12 @@ public:
         return output.str();
     }
 
-    std::string list_meters(std::string_view) const override
+    std::string list_meters(std::string_view) const
     {
         return "Live peak/RMS meters are unavailable for the PulseAudio backend.\n";
     }
 
-    std::string list_outputs(std::size_t) const override
+    std::string list_outputs(std::size_t) const
     {
         std::vector<PulsePlaybackSink> sinks;
         std::string error;
@@ -211,8 +211,8 @@ public:
         return output.str();
     }
 
-    std::string fader_status() const override { return unsupported_operation() + "\n"; }
-    std::string health_status() const override
+    std::string fader_status() const { return backend_unsupported_message() + "\n"; }
+    std::string health_status() const
     {
         std::vector<PulsePlaybackSink> sinks;
         std::string error;
@@ -261,21 +261,13 @@ public:
         return report.str();
     }
 
-    bool profile_start(std::string& error) override { return unsupported(error); }
-    std::string profile_stop(std::string& error) override { error = unsupported_operation(); return {}; }
+    std::string profile_stop(std::string& error) { error = backend_unsupported_message(); return {}; }
     bool available() const noexcept override
     {
         return started_.load(std::memory_order_acquire) && client_->connected();
     }
-    void begin_shutdown_fade() noexcept override {}
-    void pause_streams_for_shutdown() noexcept override {}
 
 private:
-    bool unsupported(std::string& error) const
-    {
-        error = unsupported_operation();
-        return false;
-    }
 
     void wake_routing_worker()
     {
@@ -353,9 +345,11 @@ private:
 
 } // namespace
 
-std::unique_ptr<AudioBackend> create_audio_backend()
-{
-    return std::make_unique<PulseAudioBackend>();
-}
-
 } // namespace shatter::backend
+
+namespace shatter::mixer {
+std::unique_ptr<IControl> create_engine()
+{
+    return std::make_unique<Engine<backend::PulseAudioBackend>>();
+}
+} // namespace shatter::mixer

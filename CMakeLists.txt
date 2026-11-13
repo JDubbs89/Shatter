@@ -91,6 +91,8 @@ endif()
 add_library(shatter_mixer STATIC
     src/mixer/dsp.cpp
     src/mixer/processor.cpp
+    src/mixer/channel_controls.cpp
+    src/mixer/presentation.cpp
     src/mixer/fx_host.cpp
     src/mixer/routing_rules.cpp
     src/mixer/meter/meter_bus.cpp
@@ -113,6 +115,7 @@ if(SHATTER_AUDIO_BACKEND STREQUAL "PIPEWIRE")
         src/backend/pipewire/pipewire_backend.cpp
         src/backend/pipewire/audio_callbacks.cpp
         src/backend/pipewire/registry.cpp
+        src/backend/pipewire/endpoints.cpp
         src/backend/pipewire/routing.cpp
         src/backend/pipewire/virtual_devices.cpp
     )
@@ -192,6 +195,10 @@ if(SHATTER_BUILD_MSI)
 endif()
 
 if(BUILD_TESTING)
+    add_executable(backend_contract_test src/backend/contract_test.cpp)
+    target_link_libraries(backend_contract_test PRIVATE shatter_backend GTest::gtest_main)
+    add_test(NAME backend_contract COMMAND backend_contract_test)
+
     add_executable(platform_control_test tests/unit/platform-control.cpp)
     target_link_libraries(platform_control_test PRIVATE shatter_control_platform GTest::gtest_main)
     add_test(NAME platform_control COMMAND platform_control_test)
@@ -247,6 +254,13 @@ if(BUILD_TESTING)
             set_tests_properties(windows_cli_lifecycle PROPERTIES TIMEOUT 20 RUN_SERIAL TRUE)
         endif()
     endif()
+    add_executable(audio_engine_test src/mixer/audio_engine_test.cpp)
+    target_link_libraries(audio_engine_test PRIVATE shatter_mixer GTest::gtest_main)
+    add_test(NAME audio_engine COMMAND audio_engine_test)
+    add_executable(mixer_engine_test src/mixer/engine_test.cpp)
+    target_link_libraries(mixer_engine_test PRIVATE shatter_mixer GTest::gtest_main)
+    add_test(NAME mixer_engine COMMAND mixer_engine_test)
+
     add_executable(mixer_processor_test src/mixer/processor_test.cpp)
     target_link_libraries(mixer_processor_test PRIVATE shatter_mixer GTest::gtest_main)
     add_test(NAME mixer_processor COMMAND mixer_processor_test)

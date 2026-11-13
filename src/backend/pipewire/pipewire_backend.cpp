@@ -1,5 +1,6 @@
 #include "backend/pipewire/pipewire_backend.hpp"
 #include "mixer/identifiers.hpp"
+#include "mixer/presentation.hpp"
 
 #include <pipewire/keys.h>
 #include <pipewire/loop.h>
@@ -23,16 +24,13 @@
 #include <vector>
 
 namespace shatter::backend {
+using namespace mixer::presentation;
 namespace {
 
 constexpr char kSpeakerStreamName[] = "shatter.speakers";
 constexpr char kTargetObjectKey[] = "target.object";
 constexpr std::uint32_t kSampleRate = 48000;
 constexpr std::uint32_t kChannels = 2;
-constexpr float kMinimumGainDb = -60.0F;
-constexpr float kMaximumGainDb = 12.0F;
-constexpr std::size_t kFaderTrackWidth = 25;
-constexpr std::size_t kUnboundedColumn = std::numeric_limits<std::size_t>::max();
 
 spa_pod* build_stereo_format(spa_pod_builder* builder)
 {
@@ -50,80 +48,6 @@ bool stream_is_ready(pw_stream_state state)
     return state == PW_STREAM_STATE_PAUSED || state == PW_STREAM_STATE_STREAMING;
 }
 
-std::string fit_column(std::string_view value, std::size_t width)
-{
-    if (value.size() <= width) return std::string(value);
-    if (width < 4) return std::string(value.substr(0, width));
-    return std::string(value.substr(0, width - 3)) + "...";
-}
-
-using TableRow = std::vector<std::string>;
-
-void append_table_border(std::ostringstream& table, const std::vector<std::size_t>& widths)
-{
-    table << '+';
-    for (const std::size_t width : widths) table << std::string(width + 2, '-') << '+';
-    table << '\n';
-}
-
-void append_table_row(std::ostringstream& table, const TableRow& row,
-                      const std::vector<std::size_t>& widths)
-{
-    table << '|';
-    for (std::size_t column = 0; column < widths.size(); ++column) {
-        const std::string_view value = column < row.size() ? std::string_view(row[column]) : std::string_view{};
-        table << ' ' << std::left << std::setw(static_cast<int>(widths[column]))
-              << fit_column(value, widths[column]) << " |";
-    }
-    table << '\n';
-}
-
-void append_table(std::ostringstream& table, const std::vector<std::string>& headers,
-                  const std::vector<TableRow>& rows, const std::vector<std::size_t>& maximum_widths)
-{
-    std::vector<std::size_t> widths(headers.size(), 1);
-    for (std::size_t column = 0; column < headers.size(); ++column) {
-        widths[column] = std::min(headers[column].size(), maximum_widths[column]);
-        for (const auto& row : rows) {
-            if (column < row.size()) widths[column] = std::max(widths[column],
-                std::min(row[column].size(), maximum_widths[column]));
-        }
-    }
-    append_table_border(table, widths);
-    append_table_row(table, headers, widths);
-    append_table_border(table, widths);
-    for (const auto& row : rows) append_table_row(table, row, widths);
-    append_table_border(table, widths);
-}
-
-float gain_db(float linear)
-{
-    return linear <= 0.0F ? -60.0F : std::max(-60.0F, 20.0F * std::log10(linear));
-}
-
-std::string format_gain(float linear)
-{
-    std::ostringstream value;
-    value << std::fixed << std::setprecision(1) << gain_db(linear) << " dB";
-    return value.str();
-}
-
-std::string format_fader_position(float linear)
-{
-    const float decibels = gain_db(linear);
-    const float normalized = std::clamp((decibels - kMinimumGainDb) /
-        (kMaximumGainDb - kMinimumGainDb), 0.0F, 1.0F);
-    const auto marker = static_cast<std::size_t>(std::lround(normalized * (kFaderTrackWidth - 1)));
-    std::string track(kFaderTrackWidth, '-');
-    track[marker] = 'O';
-
-    std::ostringstream position;
-    position << "-inf |" << track << "| +12.0 dB  ";
-    if (linear <= 0.0F || decibels <= kMinimumGainDb) position << "-inf";
-    else position << format_gain(linear);
-    return position.str();
-}
-
 std::string make_channel_id(std::string_view identity)
 {
     std::uint64_t hash = 14695981039346656037ULL;
@@ -138,10 +62,15 @@ std::string make_channel_id(std::string_view identity)
 
 } // namespace
 
+mixer::ProcessingState PipeWireBackend::processing_state() noexcept
+{
+    return {app_channels_, mixer_streams_, mixer_outputs_, mixer_captures_,
+            allocated_channels_, allocated_streams_, profiler_, xruns_,
+            latest_input_ring_frames_, shutdown_fade_requested_};
+}
+
 PipeWireBackend::PipeWireBackend()
-    : processor_({app_channels_, mixer_streams_, mixer_outputs_, mixer_captures_,
-                  allocated_channels_, allocated_streams_, profiler_, xruns_,
-                  latest_input_ring_frames_, shutdown_fade_requested_})
+    : processor_(processing_state()), audio_engine_(*this, processor_, profiler_)
 {
     for (std::size_t index = 0; index < playback_streams_.size(); ++index)
         mixer_streams_[index] = &playback_streams_[index];
@@ -166,7 +95,7 @@ bool PipeWireBackend::start(std::string& error)
     speakers.backend = this;
     speakers.in_use = true;
     speakers.name = "speakers";
-    speakers.node_name = kSpeakerStreamName;
+    speakers.identity = kSpeakerStreamName;
     speakers.target_gain.store(1.0F, std::memory_order_relaxed);
     speakers.muted.store(false, std::memory_order_relaxed);
     speakers.smoothed_gain = 1.0F;
@@ -231,232 +160,6 @@ void PipeWireBackend::stop()
     cleanup();
 }
 
-bool PipeWireBackend::set_app_gain_db(std::string_view channel_id, float decibels, std::string& error)
-{
-    if (!std::isfinite(decibels) || decibels < kMinimumGainDb || decibels > kMaximumGainDb) {
-        error = "gain must be between -60 dB and +12 dB";
-        return false;
-    }
-    std::lock_guard lock(nodes_mutex_);
-    AppChannel* channel = resolve_channel_locked(channel_id, error);
-    if (channel == nullptr) {
-        return false;
-    }
-    channel->target_gain.store(std::pow(10.0F, decibels / 20.0F), std::memory_order_relaxed);
-    return true;
-}
-
-bool PipeWireBackend::set_stream_gain_db(std::string_view stream_selector, float decibels, std::string& error)
-{
-    if (!std::isfinite(decibels) || decibels < kMinimumGainDb || decibels > kMaximumGainDb) {
-        error = "gain must be between -60 dB and +12 dB";
-        return false;
-    }
-    std::lock_guard lock(nodes_mutex_);
-    PlaybackStream* stream = resolve_stream_locked(stream_selector, error);
-    if (stream == nullptr || !stream->active.load(std::memory_order_relaxed)) {
-        if (error.empty()) error = "unknown or inactive playback stream: " + std::string(stream_selector);
-        return false;
-    }
-    stream->target_gain.store(std::pow(10.0F, decibels / 20.0F), std::memory_order_relaxed);
-    return true;
-}
-
-bool PipeWireBackend::set_app_muted(std::string_view channel_id, bool muted, std::string& error)
-{
-    std::lock_guard lock(nodes_mutex_);
-    AppChannel* channel = resolve_channel_locked(channel_id, error);
-    if (channel == nullptr) {
-        return false;
-    }
-    channel->muted.store(muted, std::memory_order_relaxed);
-    return true;
-}
-
-bool PipeWireBackend::set_stream_muted(std::string_view stream_selector, bool muted, std::string& error)
-{
-    std::lock_guard lock(nodes_mutex_);
-    PlaybackStream* stream = resolve_stream_locked(stream_selector, error);
-    if (stream == nullptr || !stream->active.load(std::memory_order_relaxed)) {
-        if (error.empty()) error = "unknown or inactive playback stream: " + std::string(stream_selector);
-        return false;
-    }
-    stream->muted.store(muted, std::memory_order_relaxed);
-    return true;
-}
-
-bool PipeWireBackend::rename_app(std::string_view current_name, std::string new_name, std::string& error)
-{
-    if (new_name.empty()) {
-        error = "new app name cannot be empty";
-        return false;
-    }
-    std::lock_guard lock(nodes_mutex_);
-    AppChannel* channel = resolve_channel_locked(current_name, error);
-    if (channel == nullptr) return false;
-    for (std::size_t index = 0; index < allocated_channels_.load(std::memory_order_relaxed); ++index) {
-        if (&app_channels_[index] != channel && app_channels_[index].name == new_name) {
-            error = "another app channel already uses the name: " + new_name;
-            return false;
-        }
-    }
-    channel->name = std::move(new_name);
-    return true;
-}
-
-bool PipeWireBackend::rename_stream(std::string_view current_name, std::string new_name, std::string& error)
-{
-    if (new_name.empty()) {
-        error = "new stream name cannot be empty";
-        return false;
-    }
-    std::lock_guard lock(nodes_mutex_);
-    PlaybackStream* stream = resolve_stream_locked(current_name, error);
-    if (stream == nullptr) return false;
-    for (std::size_t index = 0; index < allocated_streams_.load(std::memory_order_relaxed); ++index) {
-        if (&playback_streams_[index] != stream && playback_streams_[index].in_use &&
-            playback_streams_[index].name == new_name) {
-            error = "another playback stream already uses the name: " + new_name;
-            return false;
-        }
-    }
-    stream->name = std::move(new_name);
-    return true;
-}
-
-bool PipeWireBackend::set_capture_source(std::string_view source_selector, std::string& error)
-{
-    std::lock_guard lock(nodes_mutex_);
-    if (resolve_capture_channel_locked(source_selector, error) == nullptr) return false;
-    error = "capture sources are already available as input channels; assign the channel directly";
-    return false;
-}
-
-bool PipeWireBackend::set_capture_gain_db(float decibels, std::string& error)
-{
-    if (!std::isfinite(decibels) || decibels < kMinimumGainDb || decibels > kMaximumGainDb) {
-        error = "gain must be between -60 dB and +12 dB";
-        return false;
-    }
-    for (auto& channel : capture_channels_)
-        if (channel.in_use) channel.target_gain.store(std::pow(10.0F, decibels / 20.0F), std::memory_order_relaxed);
-    return true;
-}
-
-bool PipeWireBackend::set_capture_muted(std::string_view selector, bool muted, std::string& error)
-{
-    std::lock_guard lock(nodes_mutex_);
-    CaptureChannel* channel = resolve_capture_channel_locked(selector, error);
-    if (channel == nullptr) return false;
-    channel->muted.store(muted, std::memory_order_release);
-    return true;
-}
-
-bool PipeWireBackend::adjust_fader_db(std::string_view scope, std::string_view selector, float delta_db,
-                                     bool minimum, std::string& error)
-{
-    return update_fader_db(scope, selector, delta_db,
-                           minimum ? FaderUpdateMode::minimum : FaderUpdateMode::relative, error);
-}
-
-bool PipeWireBackend::set_fader_db(std::string_view scope, std::string_view selector, float decibels,
-                                  bool minimum, std::string& error)
-{
-    return update_fader_db(scope, selector, decibels,
-                           minimum ? FaderUpdateMode::minimum : FaderUpdateMode::absolute, error);
-}
-
-bool PipeWireBackend::update_fader_db(std::string_view scope, std::string_view selector, float decibels,
-                                     FaderUpdateMode mode, std::string& error)
-{
-    if (mode != FaderUpdateMode::minimum && !std::isfinite(decibels)) {
-        error = mode == FaderUpdateMode::absolute
-            ? "fader level must be a finite number of dB or -inf"
-            : "fader increment must be a finite number of dB";
-        return false;
-    }
-    const auto adjusted = [decibels, mode](float current_gain) {
-        if (mode == FaderUpdateMode::minimum) return 0.0F;
-        const float target_db = mode == FaderUpdateMode::absolute
-            ? std::clamp(decibels, kMinimumGainDb, kMaximumGainDb)
-            : std::clamp(gain_db(current_gain) + decibels, kMinimumGainDb, kMaximumGainDb);
-        return std::pow(10.0F, target_db / 20.0F);
-    };
-
-    if (scope == "app") {
-        std::lock_guard lock(nodes_mutex_);
-        AppChannel* channel = resolve_channel_locked(selector, error);
-        if (channel == nullptr) return false;
-        channel->target_gain.store(adjusted(channel->target_gain.load(std::memory_order_relaxed)),
-                                   std::memory_order_release);
-        return true;
-    }
-    if (scope == "stream") {
-        std::lock_guard lock(nodes_mutex_);
-        PlaybackStream* stream = resolve_stream_locked(selector, error);
-        if (stream == nullptr || !stream->active.load(std::memory_order_relaxed)) {
-            if (error.empty()) error = "unknown or inactive playback stream: " + std::string(selector);
-            return false;
-        }
-        stream->target_gain.store(adjusted(stream->target_gain.load(std::memory_order_relaxed)),
-                                  std::memory_order_release);
-        return true;
-    }
-    if (scope == "capture") {
-        std::lock_guard lock(nodes_mutex_);
-        CaptureChannel* channel = resolve_capture_channel_locked(selector, error);
-        if (channel == nullptr) return false;
-        channel->target_gain.store(adjusted(channel->target_gain.load(std::memory_order_relaxed)),
-                                   std::memory_order_release);
-        return true;
-    }
-    if (scope == "output") {
-        std::lock_guard lock(nodes_mutex_);
-        OutputChannel* output = resolve_output_locked(selector, error);
-        if (output == nullptr) return false;
-        output->target_gain.store(adjusted(output->target_gain.load(std::memory_order_relaxed)),
-                                  std::memory_order_release);
-        return true;
-    }
-    error = "fader scope must be app, stream, capture, or output";
-    return false;
-}
-
-bool PipeWireBackend::set_output_gain_db(std::string_view output_selector, float decibels, std::string& error)
-{
-    if (!std::isfinite(decibels) || decibels < kMinimumGainDb || decibels > kMaximumGainDb) {
-        error = "gain must be between -60 dB and +12 dB";
-        return false;
-    }
-    std::lock_guard lock(nodes_mutex_);
-    OutputChannel* output = resolve_output_locked(output_selector, error);
-    if (output == nullptr) return false;
-    output->target_gain.store(std::pow(10.0F, decibels / 20.0F), std::memory_order_release);
-    return true;
-}
-
-bool PipeWireBackend::set_output_muted(std::string_view output_selector, bool muted, std::string& error)
-{
-    std::lock_guard lock(nodes_mutex_);
-    OutputChannel* output = resolve_output_locked(output_selector, error);
-    if (output == nullptr) return false;
-    output->muted.store(muted, std::memory_order_release);
-    return true;
-}
-
-bool PipeWireBackend::set_capture_speaker_send(bool enabled, std::string& error)
-{
-    (void)error;
-    for (auto& channel : capture_channels_) {
-        if (!channel.in_use) continue;
-        auto mask = channel.output_mask.load(std::memory_order_relaxed);
-        if (enabled) mask |= 1U;
-        else mask &= ~1U;
-        channel.output_mask.store(mask, std::memory_order_release);
-    }
-    return true;
-}
-
 bool PipeWireBackend::save_config(std::string_view name, std::string& error)
 {
     state::Show show;
@@ -468,7 +171,7 @@ bool PipeWireBackend::save_config(std::string_view name, std::string& error)
             std::vector<std::string> identities;
             for (std::size_t i = 0; i < output_channels_.size(); ++i) {
                 if ((mask & (1U << i)) != 0 && output_channels_[i].in_use)
-                    identities.push_back(output_channels_[i].node_name);
+                    identities.push_back(output_channels_[i].identity);
             }
             return identities;
         };
@@ -561,7 +264,7 @@ bool PipeWireBackend::save_config(std::string_view name, std::string& error)
             if (!output.in_use) continue;
             state::OutputSetting setting;
             setting.slot = i;
-            setting.identity = output.node_name;
+            setting.identity = output.identity;
             setting.name = output.name;
             setting.capture_source = output.capture_source;
             setting.gain_db = gain_db(output.target_gain.load(std::memory_order_relaxed));
@@ -618,7 +321,7 @@ std::uint32_t PipeWireBackend::output_mask_for_identities(const std::vector<std:
     std::uint32_t mask = 0;
     for (std::size_t i = 0; i < output_channels_.size(); ++i) {
         if (!output_channels_[i].in_use) continue;
-        if (std::find(identities.begin(), identities.end(), output_channels_[i].node_name) != identities.end())
+        if (std::find(identities.begin(), identities.end(), output_channels_[i].identity) != identities.end())
             mask |= 1U << i;
     }
     return mask;
@@ -712,8 +415,8 @@ std::string PipeWireBackend::list_outputs(std::size_t) const
     std::vector<TableRow> output_rows;
     for (const auto& output : output_channels_) {
         if (!output.in_use) continue;
-        const std::string output_identity = output.node_name;
-        const std::string output_name = output.name + (output.node_name == kSpeakerStreamName ? " [default]" : "");
+        const std::string output_identity = output.identity;
+        const std::string output_name = output.name + (output.identity == kSpeakerStreamName ? " [default]" : "");
         const std::string output_type = output.capture_source ? "capture" : "playback";
         bool has_route = false;
         for (std::size_t i = 0; i < output.assigned_sink_count; ++i) {
@@ -737,7 +440,7 @@ std::string PipeWireBackend::list_outputs(std::size_t) const
                 output.muted.load() ? "yes" : "no", route});
             has_route = true;
         }
-        if (!has_route && output.node_name == kSpeakerStreamName) {
+        if (!has_route && output.identity == kSpeakerStreamName) {
             for (std::size_t i = 0; i < output.sink_count; ++i) {
                 const auto sink_id = output.sink_node_ids[i];
                 const auto target = nodes_.find(sink_id);
@@ -804,114 +507,6 @@ std::string PipeWireBackend::list_outputs(std::size_t) const
     return table.str();
 }
 
-std::string PipeWireBackend::list_meters(std::string_view selector) const
-{
-    std::lock_guard lock(nodes_mutex_);
-    struct MeterRow { std::string scope, selector, peak, rms; };
-    std::vector<MeterRow> rows;
-    const auto matches = [selector](std::initializer_list<std::string_view> names) {
-        return selector.empty() || std::find(names.begin(), names.end(), selector) != names.end();
-    };
-    const auto append = [&rows](std::string scope, std::string name, meter::Reading reading,
-                                float gain = 1.0F) {
-        const auto format_dbfs = [](float linear) {
-            std::ostringstream value;
-            value << std::fixed << std::setprecision(1) << meter::to_dbfs(linear);
-            return value.str();
-        };
-        rows.push_back({std::move(scope), std::move(name), format_dbfs(reading.peak * gain),
-                        format_dbfs(reading.rms * gain)});
-    };
-
-    const auto channel_count = allocated_channels_.load(std::memory_order_relaxed);
-    const auto stream_count = allocated_streams_.load(std::memory_order_relaxed);
-    for (std::size_t channel_index = 0; channel_index < channel_count; ++channel_index) {
-        const auto& channel = app_channels_[channel_index];
-        if (!matches({channel.id, channel.identity, channel.name})) continue;
-        const auto output_mask = channel.output_mask.load(std::memory_order_relaxed);
-        std::size_t meter_output = max_output_channels;
-        for (std::size_t index = 0; index < max_output_channels; ++index) {
-            if ((output_mask & (1U << index)) != 0) { meter_output = index; break; }
-        }
-        if (meter_output < max_output_channels) {
-            append("app", channel.id + " (" + channel.name + ")", channel.meters[meter_output].reading());
-        } else {
-            float peak = 0.0F;
-            double square_sum = 0.0;
-            for (std::size_t stream_index = 0; stream_index < stream_count; ++stream_index) {
-                const auto& stream = playback_streams_[stream_index];
-                if (!stream.active.load(std::memory_order_relaxed) || stream.channel_index != channel_index) continue;
-                const auto reading = stream.meter.reading();
-                peak = std::max(peak, reading.peak);
-                square_sum += static_cast<double>(reading.rms) * reading.rms;
-            }
-            append("app", channel.id + " (" + channel.name + ")",
-                {peak, static_cast<float>(std::sqrt(square_sum))});
-        }
-    }
-    for (std::size_t stream_index = 0; stream_index < stream_count; ++stream_index) {
-        const auto& stream = playback_streams_[stream_index];
-        if (!stream.active.load(std::memory_order_relaxed) || !stream.in_use ||
-            !matches({stream.selector_id, stream.name})) continue;
-        append("stream", stream.selector_id + " (" + stream.name + ")", stream.meter.reading());
-    }
-    for (const auto& channel : capture_channels_) {
-        if (!channel.in_use || !matches({"capture", channel.name, channel.selector_id})) continue;
-        append("capture", channel.name + " (" + channel.selector_id + ")", channel.meter.reading());
-    }
-    for (const auto& output : output_channels_) {
-        if (!output.in_use || !matches({output.name, output.node_name})) continue;
-        append("output", output.name + " (" + output.node_name + ")", output.meter.reading());
-    }
-
-    std::ostringstream result;
-    result << "Live meters (peak and RMS in dBFS; 100 ms windows; app readings use its first assigned output mix; stream, capture, and output readings are post-fader)\n"
-           << "Scope | Channel | Peak dBFS | RMS dBFS\n";
-    for (const auto& row : rows)
-        result << row.scope << " | " << row.selector << " | " << row.peak << " | " << row.rms << '\n';
-    if (rows.empty()) result << (selector.empty() ? "No active channels\n" : "No meter matches '" + std::string(selector) + "'\n");
-    return result.str();
-}
-
-std::string PipeWireBackend::fader_status() const
-{
-    std::lock_guard lock(nodes_mutex_);
-    std::vector<TableRow> app_rows;
-    for (std::size_t i = 0; i < allocated_channels_.load(std::memory_order_relaxed); ++i) {
-        const auto& channel = app_channels_[i];
-        app_rows.push_back({channel.name, format_fader_position(channel.target_gain.load())});
-    }
-    std::vector<TableRow> stream_rows;
-    for (std::size_t i = 0; i < allocated_streams_.load(std::memory_order_relaxed); ++i) {
-        const auto& stream = playback_streams_[i];
-        if (!stream.in_use || !stream.active.load(std::memory_order_relaxed)) continue;
-        stream_rows.push_back({stream.name, format_fader_position(stream.target_gain.load())});
-    }
-    std::vector<TableRow> capture_rows;
-    for (const auto& channel : capture_channels_)
-        if (channel.in_use) capture_rows.push_back({channel.name,
-            format_fader_position(channel.target_gain.load())});
-    std::vector<TableRow> output_rows;
-    for (const auto& output : output_channels_) {
-        if (!output.in_use) continue;
-        output_rows.push_back({output.name, format_fader_position(output.target_gain.load())});
-    }
-
-    std::ostringstream table;
-    table << "Fader status (range: -inf to +12 dB)\n";
-    const auto append_group = [&table](std::string_view title, std::vector<TableRow> rows,
-                                       std::string_view empty_message) {
-        if (rows.empty()) rows.push_back({std::string(empty_message), ""});
-        table << '\n' << title << '\n';
-        append_table(table, {"Channel name", "Fader position"}, rows, {kUnboundedColumn, 70});
-    };
-    append_group("Apps", std::move(app_rows), "No app channels");
-    append_group("Streams", std::move(stream_rows), "No active playback streams");
-    append_group("Capture", std::move(capture_rows), "No capture channel");
-    append_group("Outputs", std::move(output_rows), "No output channels");
-    return table.str();
-}
-
 bool PipeWireBackend::available() const noexcept
 {
     return available_ && output_linked_.load(std::memory_order_relaxed);
@@ -948,11 +543,6 @@ std::string PipeWireBackend::health_status() const
         report << "I/O buffering estimate: unavailable (PipeWire engine is not open)\n";
     }
     return report.str();
-}
-
-void PipeWireBackend::begin_shutdown_fade() noexcept
-{
-    shutdown_fade_requested_.store(true, std::memory_order_release);
 }
 
 void PipeWireBackend::pause_streams_for_shutdown() noexcept
@@ -1264,52 +854,6 @@ PipeWireBackend::PlaybackStream* PipeWireBackend::find_stream_locked(std::uint32
     return found == stream_by_node_.end() ? nullptr : &playback_streams_[found->second];
 }
 
-PipeWireBackend::AppChannel* PipeWireBackend::find_channel_locked(std::string_view channel_id)
-{
-    for (std::size_t index = 0; index < allocated_channels_.load(std::memory_order_relaxed); ++index) {
-        if (app_channels_[index].id == channel_id) {
-            return &app_channels_[index];
-        }
-    }
-    return nullptr;
-}
-
-PipeWireBackend::AppChannel* PipeWireBackend::resolve_channel_locked(std::string_view selector,
-                                                                   std::string& error)
-{
-    if (AppChannel* by_id = find_channel_locked(selector); by_id != nullptr) return by_id;
-    AppChannel* match = nullptr;
-    for (std::size_t index = 0; index < allocated_channels_.load(std::memory_order_relaxed); ++index) {
-        AppChannel& channel = app_channels_[index];
-        if (channel.name != selector) continue;
-        if (match != nullptr) {
-            error = "app name is ambiguous; use its channel ID from --list-in";
-            return nullptr;
-        }
-        match = &channel;
-    }
-    if (match == nullptr) error = "unknown app channel or name: " + std::string(selector);
-    return match;
-}
-
-PipeWireBackend::PlaybackStream* PipeWireBackend::resolve_stream_locked(std::string_view selector,
-                                                                      std::string& error)
-{
-    PlaybackStream* match = nullptr;
-    for (std::size_t index = 0; index < allocated_streams_.load(std::memory_order_relaxed); ++index) {
-        PlaybackStream& stream = playback_streams_[index];
-        if (!stream.in_use) continue;
-        if (stream.selector_id != selector && stream.name != selector) continue;
-        if (match != nullptr) {
-            error = "playback stream selector is ambiguous; use its listed stream ID";
-            return nullptr;
-        }
-        match = &stream;
-    }
-    if (match == nullptr) error = "unknown playback stream: " + std::string(selector);
-    return match;
-}
-
 std::string PipeWireBackend::playback_route_key(std::string_view app_identity,
                                                std::string_view original_name) const
 {
@@ -1387,6 +931,21 @@ void PipeWireBackend::cleanup()
         pw_main_loop_destroy(main_loop_);
         main_loop_ = nullptr;
     }
+}
+
+PipeWireBackend::AppChannel* PipeWireBackend::find_channel_locked(std::string_view channel_id)
+{
+    return channel_controls().find_channel_locked(channel_id);
+}
+
+PipeWireBackend::AppChannel* PipeWireBackend::resolve_channel_locked(std::string_view selector, std::string& error)
+{
+    return static_cast<AppChannel*>(channel_controls().resolve_channel_locked(selector, error));
+}
+
+PipeWireBackend::PlaybackStream* PipeWireBackend::resolve_stream_locked(std::string_view selector, std::string& error)
+{
+    return static_cast<PlaybackStream*>(channel_controls().resolve_stream_locked(selector, error));
 }
 
 } // namespace shatter::backend

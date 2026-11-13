@@ -1,14 +1,11 @@
-#include "backend/audio_backend.hpp"
-
 #include "backend/pipewire/pipewire_backend.hpp"
+#include "mixer/engine.hpp"
 
-#include <memory>
+namespace shatter::mixer {
 
-namespace shatter::backend {
-
-std::unique_ptr<AudioBackend> create_audio_backend()
+std::unique_ptr<IControl> create_engine()
 {
-    return std::make_unique<PipeWireBackend>();
+    return std::make_unique<Engine<backend::PipeWireBackend>>();
 }
 
-} // namespace shatter::backend
+} // namespace shatter::mixer
